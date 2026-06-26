@@ -157,10 +157,12 @@ class MixBuildWorker(QThread):
     mode: StartMode,
     *,
     start_track_id: int | None = None,
+    seed: int | None = None,
   ) -> None:
     super().__init__()
     self._mode = mode
     self._start_track_id = start_track_id
+    self._seed = seed
 
   def run(self) -> None:
     try:
@@ -179,6 +181,7 @@ class MixBuildWorker(QThread):
           tracks,
           self._mode,
           start_track_id=self._start_track_id,
+          seed=self._seed,
         )
 
       output = default_mix_path()
@@ -188,6 +191,7 @@ class MixBuildWorker(QThread):
         crossfade_duration_sec=config.crossfade_duration_sec,
         session_length_tracks=config.session_length,
         mix_settings_manual=uses_auto_mix_settings(settings),
+        seed=self._seed,
       )
       save_mix_session(session, output, metadata=metadata)
       self.finished_ok.emit(len(session.tracks), session.start_mode.value)

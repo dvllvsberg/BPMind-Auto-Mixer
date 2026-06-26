@@ -76,7 +76,10 @@ mixes/        # сохранённые рецепты
 exports/      # экспортированные WAV/MP3
 settings/     # настройки пользователя
 tests/        # pytest
+docs/         # архитектура (Transition Engine и др.)
 ```
+
+Подробнее о планируемом движке переходов: [docs/transition-engine.md](docs/transition-engine.md).
 
 ## Тесты
 

@@ -6,5 +6,6 @@
   "session_length_tracks": 11,
   "playback_volume": 100,
   "mix_settings_manual": false,
-  "advanced_settings_expanded": false
+  "advanced_settings_expanded": false,
+  "quick_analyze_only": false
 }

@@ -46,6 +46,8 @@ from engine.library.library_profile import (
   save_library_profile,
 )
 from engine.mix_generator.recipe_library import (
+  format_recipe_list_label,
+  list_recipe_files,
   recipe_file_stem,
   recipe_path_for_name,
   sanitize_recipe_name,
@@ -95,8 +97,12 @@ class MainWindow(QWidget):
     self._force_analyze_cb = QCheckBox("Пересчитать анализ")
     self._force_analyze_cb.setToolTip("Как --force в CLI: переанализировать все треки")
 
-    self._deep_analyze_cb = QCheckBox("Глубокий анализ")
-    self._deep_analyze_cb.setToolTip("Энергия, точки перехода и groove-профиль для лучшего микса")
+    self._quick_only_cb = QCheckBox("Только быстрый анализ")
+    self._quick_only_cb.setToolTip(
+      "По умолчанию после скана выполняется и глубокий анализ (энергия, переходы, groove)"
+    )
+    self._quick_only_cb.setChecked(bool(settings.get("quick_analyze_only", False)))
+    self._quick_only_cb.toggled.connect(self._on_quick_only_toggled)
 
     self._scan_btn = QPushButton("Сканировать и анализировать")
     self._scan_btn.clicked.connect(self._start_scan_analyze)
@@ -108,6 +114,22 @@ class MainWindow(QWidget):
     self._mode_combo.addItem("Случайный (random)", StartMode.RANDOM.value)
     self._mode_combo.addItem("С трека (from_track)", StartMode.FROM_TRACK.value)
     self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+
+    self._use_seed_cb = QCheckBox("Повторять случайный порядок")
+    self._use_seed_cb.setToolTip(
+      "Только random/wave. Чтобы сохранить понравившийся микс — «Сохранить сет», не эта опция."
+    )
+    self._use_seed_cb.toggled.connect(self._on_use_seed_toggled)
+    self._seed_spin = QSpinBox()
+    self._seed_spin.setRange(1, 2_147_483_647)
+    self._seed_spin.setEnabled(False)
+    self._seed_spin.setToolTip("Номер варианта случайной сборки (для CLI и продвинутых сценариев)")
+    self._seed_spin.valueChanged.connect(self._save_seed_settings)
+    saved_seed = settings.get("mix_seed")
+    if saved_seed is not None:
+      self._use_seed_cb.setChecked(True)
+      self._seed_spin.setEnabled(True)
+      self._seed_spin.setValue(int(saved_seed))
 
     self._start_track_combo = QComboBox()
     self._start_track_combo.setVisible(False)
@@ -201,6 +223,12 @@ class MainWindow(QWidget):
     self._volume_slider.setToolTip("Громкость воспроизведения")
     self._volume_slider.valueChanged.connect(self._on_volume_changed)
 
+    self._saved_recipes_list = QListWidget()
+    self._saved_recipes_list.setMinimumHeight(72)
+    self._saved_recipes_list.setMaximumHeight(120)
+    self._saved_recipes_list.setToolTip("Двойной клик — открыть сохранённый сет")
+    self._saved_recipes_list.itemDoubleClicked.connect(self._on_saved_recipe_activated)
+
     self._mix_list = QListWidget()
     self._mix_list.setMinimumHeight(140)
     self._mix_list.setToolTip("Клик — перейти к треку (или начать с него, если плеер остановлен)")
@@ -226,8 +254,6 @@ class MainWindow(QWidget):
 
     scan_row = QHBoxLayout()
     scan_row.addWidget(self._scan_btn)
-    scan_row.addWidget(self._force_analyze_cb)
-    scan_row.addWidget(self._deep_analyze_cb)
     scan_row.addStretch()
 
     mix_row = QHBoxLayout()
@@ -258,9 +284,19 @@ class MainWindow(QWidget):
 
     advanced_layout = QVBoxLayout(self._advanced_panel)
     advanced_layout.setContentsMargins(16, 0, 0, 0)
+    scan_opts_row = QHBoxLayout()
+    scan_opts_row.addWidget(self._force_analyze_cb)
+    scan_opts_row.addWidget(self._quick_only_cb)
+    scan_opts_row.addStretch()
+    advanced_layout.addLayout(scan_opts_row)
     advanced_layout.addLayout(settings_row)
     advanced_layout.addLayout(play_ratio_row)
     advanced_layout.addLayout(groove_row)
+    seed_row = QHBoxLayout()
+    seed_row.addWidget(self._use_seed_cb)
+    seed_row.addWidget(self._seed_spin)
+    seed_row.addStretch()
+    advanced_layout.addLayout(seed_row)
     reset_row = QHBoxLayout()
     reset_row.addWidget(self._reset_auto_btn)
     reset_row.addStretch()
@@ -290,6 +326,9 @@ class MainWindow(QWidget):
 
     mix_box = QGroupBox("Сет")
     mix_layout = QVBoxLayout(mix_box)
+    mix_layout.addWidget(QLabel("Сохранённые сеты"))
+    mix_layout.addWidget(self._saved_recipes_list)
+    mix_layout.addWidget(QLabel("Текущий сет"))
     mix_layout.addWidget(self._mix_list)
 
     layout = QVBoxLayout(self)
@@ -310,6 +349,8 @@ class MainWindow(QWidget):
 
     self._refresh_start_track_combo()
     self._reload_library_profile_ui()
+    self._refresh_saved_recipes_list()
+    self._on_mode_changed()
 
     if default_mix_path().exists():
       self._load_mix_plan()
@@ -441,6 +482,46 @@ class MainWindow(QWidget):
     self._mode_combo.blockSignals(False)
     self._start_track_combo.setVisible(mode == StartMode.FROM_TRACK)
 
+  def _on_quick_only_toggled(self, checked: bool) -> None:
+    settings = load_settings()
+    settings["quick_analyze_only"] = checked
+    save_settings(settings)
+
+  def _on_use_seed_toggled(self, checked: bool) -> None:
+    self._seed_spin.setEnabled(checked)
+    self._save_seed_settings()
+
+  def _save_seed_settings(self) -> None:
+    settings = load_settings()
+    if self._use_seed_cb.isChecked():
+      settings["mix_seed"] = self._seed_spin.value()
+    else:
+      settings.pop("mix_seed", None)
+    save_settings(settings)
+
+  def _current_mix_seed(self) -> int | None:
+    mode_value = self._mode_combo.currentData()
+    if mode_value not in (StartMode.RANDOM.value, StartMode.WAVE.value):
+      return None
+    if not self._use_seed_cb.isChecked():
+      return None
+    return self._seed_spin.value()
+
+  def _refresh_saved_recipes_list(self) -> None:
+    self._saved_recipes_list.clear()
+    target_dir = mixes_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for path in list_recipe_files(target_dir):
+      self._saved_recipes_list.addItem(format_recipe_list_label(path))
+      row = self._saved_recipes_list.count() - 1
+      self._saved_recipes_list.item(row).setData(Qt.ItemDataRole.UserRole, str(path))
+
+  def _on_saved_recipe_activated(self, item) -> None:
+    path_text = item.data(Qt.ItemDataRole.UserRole)
+    if not path_text:
+      return
+    self._load_recipe_from_path(Path(path_text))
+
   def _apply_recipe_metadata_to_ui(self, metadata: MixRecipeMetadata, session: MixSession) -> None:
     self._set_mode_combo(session.start_mode)
     self._applying_profile = True
@@ -464,10 +545,50 @@ class MainWindow(QWidget):
         groove_pct = int(metadata.groove_weight * 100)
         self._groove_slider.setValue(groove_pct)
         self._groove_label.setText(f"{groove_pct}%")
+      if metadata.seed is not None:
+        settings["mix_seed"] = metadata.seed
+        self._use_seed_cb.blockSignals(True)
+        self._seed_spin.blockSignals(True)
+        self._use_seed_cb.setChecked(True)
+        self._seed_spin.setEnabled(True)
+        self._seed_spin.setValue(metadata.seed)
+        self._use_seed_cb.blockSignals(False)
+        self._seed_spin.blockSignals(False)
       save_settings(settings)
     finally:
       self._applying_profile = False
     self._refresh_auto_profile_hint()
+
+  def _load_recipe_from_path(self, recipe_path: Path) -> bool:
+    try:
+      session, metadata = load_mix_recipe(recipe_path)
+    except Exception as exc:
+      QMessageBox.critical(self, "BPMind", f"Не удалось прочитать рецепт:\n{exc}")
+      return False
+
+    if not default_db_path().exists():
+      QMessageBox.warning(self, "BPMind", "База библиотеки не найдена. Сначала просканируйте папку.")
+      return False
+
+    with TrackRepository(default_db_path()) as repo:
+      problems = validate_recipe_tracks(session, repo)
+
+    if problems:
+      QMessageBox.warning(
+        self,
+        "BPMind",
+        "Рецепт нельзя воспроизвести:\n\n" + "\n".join(f"• {item}" for item in problems[:8]),
+      )
+      return False
+
+    self._stop_playback()
+    save_mix_recipe(session, default_mix_path(), metadata=metadata)
+    self._apply_recipe_metadata_to_ui(metadata, session)
+    self._load_mix_plan()
+
+    label = metadata.name or recipe_path.stem
+    self._status.setText(f"Открыт сет «{label}»: {len(session.tracks)} треков, режим {session.start_mode.value}.")
+    return True
 
   def _save_current_recipe(self) -> None:
     mix_path = default_mix_path()
@@ -512,8 +633,10 @@ class MainWindow(QWidget):
       crossfade_duration_sec=metadata.crossfade_duration_sec,
       session_length_tracks=metadata.session_length_tracks,
       mix_settings_manual=metadata.mix_settings_manual,
+      seed=metadata.seed,
     )
     save_mix_recipe(session, target_path, metadata=recipe_metadata)
+    self._refresh_saved_recipes_list()
     self._status.setText(f"Сет сохранён: {target_path.name}")
 
   def _open_saved_recipe(self) -> None:
@@ -530,35 +653,7 @@ class MainWindow(QWidget):
     if not path:
       return
 
-    recipe_path = Path(path)
-    try:
-      session, metadata = load_mix_recipe(recipe_path)
-    except Exception as exc:
-      QMessageBox.critical(self, "BPMind", f"Не удалось прочитать рецепт:\n{exc}")
-      return
-
-    if not default_db_path().exists():
-      QMessageBox.warning(self, "BPMind", "База библиотеки не найдена. Сначала просканируйте папку.")
-      return
-
-    with TrackRepository(default_db_path()) as repo:
-      problems = validate_recipe_tracks(session, repo)
-
-    if problems:
-      QMessageBox.warning(
-        self,
-        "BPMind",
-        "Рецепт нельзя воспроизвести:\n\n" + "\n".join(f"• {item}" for item in problems[:8]),
-      )
-      return
-
-    self._stop_playback()
-    save_mix_recipe(session, default_mix_path(), metadata=metadata)
-    self._apply_recipe_metadata_to_ui(metadata, session)
-    self._load_mix_plan()
-
-    label = metadata.name or recipe_path.stem
-    self._status.setText(f"Открыт сет «{label}»: {len(session.tracks)} треков, режим {session.start_mode.value}.")
+    self._load_recipe_from_path(Path(path))
 
   def _suggested_export_path(self, *, extension: str = ".mp3") -> Path:
     exports_dir().mkdir(parents=True, exist_ok=True)
@@ -651,9 +746,20 @@ class MainWindow(QWidget):
     self._player.seek_to_session(session_sec)
     self._update_time_label(session_sec)
 
+  def _update_seed_controls_for_mode(self) -> None:
+    mode_value = self._mode_combo.currentData()
+    uses_seed = mode_value in (StartMode.RANDOM.value, StartMode.WAVE.value)
+    self._use_seed_cb.setEnabled(uses_seed)
+    if not uses_seed:
+      self._seed_spin.setEnabled(False)
+    elif self._use_seed_cb.isChecked():
+      self._seed_spin.setEnabled(True)
+
   def _on_mode_changed(self) -> None:
-    is_from_track = self._mode_combo.currentData() == StartMode.FROM_TRACK.value
+    mode_value = self._mode_combo.currentData()
+    is_from_track = mode_value == StartMode.FROM_TRACK.value
     self._start_track_combo.setVisible(is_from_track)
+    self._update_seed_controls_for_mode()
     if uses_auto_mix_settings(load_settings()):
       profile = self._current_library_profile()
       if profile is not None:
@@ -702,7 +808,7 @@ class MainWindow(QWidget):
     self._status.setText("Запуск сканирования и анализа...")
 
     force = self._force_analyze_cb.isChecked()
-    deep = self._deep_analyze_cb.isChecked()
+    deep = not self._quick_only_cb.isChecked()
 
     if deep and default_db_path().exists():
       with TrackRepository(default_db_path()) as repo:
@@ -715,7 +821,7 @@ class MainWindow(QWidget):
             self,
             "BPMind",
             "Глубокий анализ уже выполнен для всех треков.\n\n"
-            "Включите «Пересчитать анализ», если хотите прогнать его заново.",
+            "Включите «Пересчитать анализ» в Дополнительно, если хотите прогнать его заново.",
           )
 
     self._scan_worker = ScanAnalyzeWorker(Path(folder), force=force, deep=deep)
@@ -744,7 +850,7 @@ class MainWindow(QWidget):
         "BPMind",
         f"{summary}\n\nОшибок при анализе: {failed}.",
       )
-    elif analyzed == 0 and self._deep_analyze_cb.isChecked():
+    elif analyzed == 0 and not self._quick_only_cb.isChecked():
       QMessageBox.information(self, "BPMind", summary)
 
   def _start_build_mix(self) -> None:
@@ -767,7 +873,11 @@ class MainWindow(QWidget):
     self._mix_btn.setEnabled(False)
     self._status.setText("Построение микса...")
 
-    self._mix_worker = MixBuildWorker(mode, start_track_id=start_track_id)
+    self._mix_worker = MixBuildWorker(
+      mode,
+      start_track_id=start_track_id,
+      seed=self._current_mix_seed(),
+    )
     self._mix_worker.finished_ok.connect(self._on_mix_built)
     self._mix_worker.failed.connect(self._on_worker_failed)
     self._mix_worker.finished.connect(lambda: self._mix_btn.setEnabled(True))

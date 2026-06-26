@@ -19,6 +19,7 @@ def _metadata_to_dict(metadata: MixRecipeMetadata | None) -> dict | None:
     "crossfade_duration_sec": metadata.crossfade_duration_sec,
     "session_length_tracks": metadata.session_length_tracks,
     "mix_settings_manual": metadata.mix_settings_manual,
+    "seed": metadata.seed,
   }
   if metadata.saved_at is not None:
     payload["saved_at"] = metadata.saved_at.isoformat()
@@ -36,6 +37,7 @@ def _metadata_from_dict(data: dict | None) -> MixRecipeMetadata:
     crossfade_duration_sec=data.get("crossfade_duration_sec"),
     session_length_tracks=data.get("session_length_tracks"),
     mix_settings_manual=data.get("mix_settings_manual"),
+    seed=data.get("seed"),
     saved_at=datetime.fromisoformat(saved_at) if saved_at else None,
   )
 
@@ -125,6 +127,7 @@ def save_mix_recipe(
     crossfade_duration_sec=metadata.crossfade_duration_sec,
     session_length_tracks=metadata.session_length_tracks,
     mix_settings_manual=metadata.mix_settings_manual,
+    seed=metadata.seed,
     saved_at=metadata.saved_at or datetime.now(),
   )
   save_mix_session(session, path, metadata=recipe_metadata)
@@ -150,6 +153,7 @@ def load_mix_recipe(path: Path) -> tuple[MixSession, MixRecipeMetadata]:
       crossfade_duration_sec=metadata.crossfade_duration_sec,
       session_length_tracks=metadata.session_length_tracks,
       mix_settings_manual=metadata.mix_settings_manual,
+      seed=metadata.seed,
       saved_at=datetime.fromisoformat(saved_at) if saved_at else metadata.saved_at,
     )
   return session, metadata

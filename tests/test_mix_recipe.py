@@ -7,6 +7,7 @@ import pytest
 from engine.domain.enums import StartMode, TransitionType
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition
 from engine.mix_generator.recipe_library import (
+  format_recipe_list_label,
   recipe_file_stem,
   recipe_path_for_name,
   sanitize_recipe_name,
@@ -44,6 +45,7 @@ def test_recipe_roundtrip_with_generator_metadata(tmp_path: Path):
     crossfade_duration_sec=8.0,
     session_length_tracks=11,
     mix_settings_manual=False,
+    seed=42,
   )
   path = tmp_path / "friday_wave.json"
   save_mix_recipe(session, path, metadata=metadata)
@@ -56,6 +58,7 @@ def test_recipe_roundtrip_with_generator_metadata(tmp_path: Path):
   assert loaded_metadata.track_play_ratio == 0.82
   assert loaded_metadata.groove_weight == 0.28
   assert loaded_metadata.session_length_tracks == 11
+  assert loaded_metadata.seed == 42
 
   raw = json.loads(path.read_text(encoding="utf-8"))
   assert raw["schema_version"] == RECIPE_SCHEMA_VERSION
@@ -88,3 +91,15 @@ def test_sanitize_recipe_name():
 def test_recipe_path_for_name(tmp_path: Path):
   path = recipe_path_for_name("Test set", mixes_dir=tmp_path)
   assert path == tmp_path / "Test_set.json"
+
+
+def test_format_recipe_list_label(tmp_path: Path):
+  session = _sample_session()
+  metadata = MixRecipeMetadata(name="Night mix", seed=7)
+  path = tmp_path / "night.json"
+  save_mix_recipe(session, path, metadata=metadata)
+
+  label = format_recipe_list_label(path)
+  assert "Night mix" in label
+  assert "wave" in label
+  assert "seed 7" in label

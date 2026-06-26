@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -29,6 +30,24 @@ def list_recipe_files(mixes_dir: Path) -> list[Path]:
   if not mixes_dir.exists():
     return []
   return sorted(mixes_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def format_recipe_list_label(path: Path) -> str:
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return path.stem
+
+  name = data.get("name")
+  generator = data.get("generator") or {}
+  if not name:
+    name = generator.get("name") or path.stem
+
+  mode = data.get("start_mode", "?")
+  track_count = len(data.get("tracks", []))
+  seed = generator.get("seed")
+  seed_hint = f", seed {seed}" if seed is not None else ""
+  return f"{name}  ({mode}, {track_count} тр.{seed_hint})"
 
 
 def validate_recipe_tracks(session: MixSession, repo: TrackRepository) -> list[str]:

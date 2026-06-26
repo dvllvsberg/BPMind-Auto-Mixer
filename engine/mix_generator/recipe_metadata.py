@@ -14,4 +14,5 @@ class MixRecipeMetadata:
   crossfade_duration_sec: float | None = None
   session_length_tracks: int | None = None
   mix_settings_manual: bool | None = None
+  seed: int | None = None
   saved_at: datetime | None = None
