@@ -1,0 +1,10 @@
+{
+  "library_path": "",
+  "crossfade_duration_sec": 8.0,
+  "track_play_ratio": 0.75,
+  "groove_weight": 0.35,
+  "session_length_tracks": 11,
+  "playback_volume": 100,
+  "mix_settings_manual": false,
+  "advanced_settings_expanded": false
+}
