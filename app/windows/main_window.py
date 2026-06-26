@@ -38,7 +38,7 @@ from app.ui.timeline_widget import MixTimelineWidget, format_time
 from app.workers import ExportAudioWorker, MixBuildWorker, ScanAnalyzeWorker, track_label
 from engine.database.repository import TrackRepository
 from engine.domain.enums import AnalysisLevel, StartMode
-from engine.domain.models import MixSession, Track
+from engine.domain.models import MixSession, PlannedTransition, Track
 from engine.library.library_profile import (
   compute_library_profile,
   load_library_profile,
@@ -57,6 +57,7 @@ from engine.mix_generator.recipe_metadata import MixRecipeMetadata
 from engine.mix_generator.session_store import load_mix_recipe, load_mix_session, save_mix_recipe
 from engine.playback.session_player import PlayerState, SessionPlayer
 from engine.playback.timeline_plan import SessionTimeline, build_session_timeline
+from engine.transitions.display import format_transition_arrow, summarize_session_transitions
 
 
 def _start_track_combo_label(track: Track, *, list_index: int) -> str:
@@ -64,8 +65,14 @@ def _start_track_combo_label(track: Track, *, list_index: int) -> str:
   return f"{list_index}. {bpm} BPM  {track_label(track)}"
 
 
-def _mix_list_label(track: Track, *, list_index: int) -> str:
-  return _start_track_combo_label(track, list_index=list_index)
+def _mix_list_label(
+  track: Track,
+  *,
+  list_index: int,
+  transition: PlannedTransition | None = None,
+) -> str:
+  base = _start_track_combo_label(track, list_index=list_index)
+  return base + format_transition_arrow(transition)
 
 
 class MainWindow(QWidget):
@@ -82,6 +89,7 @@ class MainWindow(QWidget):
     self._export_worker: ExportAudioWorker | None = None
     self._ending_session = False
     self._session_timeline: SessionTimeline | None = None
+    self._transitions_by_from: dict[int, PlannedTransition] = {}
     self._applying_profile = False
 
     settings = load_settings()
@@ -328,6 +336,10 @@ class MainWindow(QWidget):
     mix_layout = QVBoxLayout(mix_box)
     mix_layout.addWidget(QLabel("Сохранённые сеты"))
     mix_layout.addWidget(self._saved_recipes_list)
+    self._transitions_summary_label = QLabel("")
+    self._transitions_summary_label.setWordWrap(True)
+    self._transitions_summary_label.setStyleSheet("color: palette(mid);")
+    mix_layout.addWidget(self._transitions_summary_label)
     mix_layout.addWidget(QLabel("Текущий сет"))
     mix_layout.addWidget(self._mix_list)
 
@@ -884,9 +896,14 @@ class MainWindow(QWidget):
     self._mix_worker.start()
 
   def _on_mix_built(self, count: int, mode_name: str) -> None:
-    self._status.setText(f"Микс готов: {count} треков, режим {mode_name}.")
     self._load_mix_plan()
-    QMessageBox.information(self, "BPMind", f"Mix Session собрана: {count} треков.")
+    summary = self._transitions_summary_label.text()
+    self._status.setText(f"Микс готов: {count} треков, режим {mode_name}. {summary}")
+    QMessageBox.information(
+      self,
+      "BPMind",
+      f"Mix Session собрана: {count} треков.\n\n{summary}",
+    )
 
   def _on_worker_failed(self, message: str) -> None:
     self._progress.setVisible(False)
@@ -897,14 +914,20 @@ class MainWindow(QWidget):
     mix_path = default_mix_path()
     if not mix_path.exists():
       self._mix_track_ids = []
+      self._transitions_by_from = {}
       self._session_timeline = None
       self._timeline_widget.set_timeline(None)
       self._update_time_label(0.0)
+      self._transitions_summary_label.setText("")
       self._refresh_mix_list()
       return
 
     session = load_mix_session(mix_path)
     self._mix_track_ids = [item.track_id for item in session.tracks]
+    self._transitions_by_from = {
+      transition.from_track_id: transition for transition in session.transitions
+    }
+    self._transitions_summary_label.setText(summarize_session_transitions(session))
 
     if not default_db_path().exists():
       self._session_timeline = None
@@ -932,7 +955,10 @@ class MainWindow(QWidget):
       if track is None:
         self._mix_list.addItem(f"{list_index}. [трек {track_id} недоступен]")
         continue
-      self._mix_list.addItem(_mix_list_label(track, list_index=list_index))
+      transition = self._transitions_by_from.get(track_id)
+      self._mix_list.addItem(
+        _mix_list_label(track, list_index=list_index, transition=transition),
+      )
 
   def _highlight_mix_list_row(self, row: int | None) -> None:
     self._mix_list.blockSignals(True)
@@ -1087,4 +1113,10 @@ class MainWindow(QWidget):
       if next_track is not None:
         nbpm = f"{next_track.bpm:.1f}" if next_track.bpm else "?"
         next_text = f"Далее: {nbpm} BPM  {track_label(next_track)}"
+        current_id = self._mix_track_ids[self._player.current_index]
+        transition = self._transitions_by_from.get(current_id)
+        if transition is not None:
+          hint = format_transition_arrow(transition).strip()
+          if hint.startswith("→"):
+            next_text += f"  {hint}"
     self._next_label.setText(next_text)

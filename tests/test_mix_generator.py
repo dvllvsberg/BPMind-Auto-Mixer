@@ -9,6 +9,8 @@ from engine.mix_generator.bpm_utils import bpm_distance
 from engine.mix_generator.mix_generator import MixGenerator, MixGeneratorConfig, MixGeneratorError
 from engine.mix_generator.recipe_metadata import MixRecipeMetadata
 from engine.mix_generator.session_store import load_mix_recipe, save_mix_recipe
+from engine.mix_pipeline import build_mix_session
+from engine.transitions.modes import TransitionMode
 
 
 def _track(
@@ -57,18 +59,35 @@ def test_bpm_distance_treats_half_time_as_compatible():
   assert bpm_distance(70.0, 140.0) == pytest.approx(0.0)
 
 
-def test_mix_generator_uses_all_tracks_when_library_is_small():
+def test_mix_generator_does_not_assign_transitions():
   tracks = [
-    _track(1, "A", bpm=68.0, loudness=-24.0),
-    _track(2, "B", bpm=70.0, loudness=-20.0),
-    _track(3, "C", bpm=99.0, loudness=-12.0),
+    _track(1, "A", bpm=68.0),
+    _track(2, "B", bpm=70.0),
   ]
-  generator = MixGenerator(MixGeneratorConfig(session_length=12))
-  session = generator.generate(tracks, StartMode.CALM, seed=1)
+  generator = MixGenerator(MixGeneratorConfig(session_length=2))
+  session = generator.generate(tracks, StartMode.RANDOM, seed=1)
+
+  assert len(session.tracks) == 2
+  assert session.transitions == []
+
+
+def test_mix_pipeline_assigns_transitions():
+  tracks = [
+    _track(1, "A", bpm=68.0),
+    _track(2, "B", bpm=70.0),
+    _track(3, "C", bpm=99.0),
+  ]
+  session = build_mix_session(
+    tracks,
+    StartMode.CALM,
+    MixGeneratorConfig(session_length=3),
+    mix_seed=1,
+    transition_mode=TransitionMode.AUTO,
+  )
 
   assert len(session.tracks) == 3
   assert len(session.transitions) == 2
-  assert session.tracks[0].track_id == 1
+  assert session.transitions[0].type.value in {"smooth_blend", "cut", "filter_sweep"}
 
 
 def test_mix_generator_prefers_close_bpm_over_outlier():
@@ -98,7 +117,13 @@ def test_session_store_roundtrip(tmp_path: Path):
     _track(2, "B", bpm=70.0),
   ]
   generator = MixGenerator(MixGeneratorConfig(session_length=2))
-  session = generator.generate(tracks, StartMode.RANDOM, seed=42)
+  session = build_mix_session(
+    tracks,
+    StartMode.RANDOM,
+    MixGeneratorConfig(session_length=2, crossfade_duration_sec=8.0),
+    mix_seed=42,
+    transition_mode=TransitionMode.AUTO,
+  )
 
   path = tmp_path / "mix.json"
   metadata = MixRecipeMetadata(

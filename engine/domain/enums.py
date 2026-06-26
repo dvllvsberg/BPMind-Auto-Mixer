@@ -16,7 +16,21 @@ class AnalysisLevel(str, Enum):
 
 
 class TransitionType(str, Enum):
-  CROSSFADE = "crossfade"
+  SMOOTH_BLEND = "smooth_blend"
+  CUT = "cut"
+  FILTER_SWEEP = "filter_sweep"
+  CROSSFADE = "crossfade"  # legacy alias → smooth_blend
+
+  @classmethod
+  def parse(cls, value: str) -> "TransitionType":
+    if value == "crossfade":
+      return cls.SMOOTH_BLEND
+    return cls(value)
+
+  def normalized(self) -> "TransitionType":
+    if self is TransitionType.CROSSFADE:
+      return TransitionType.SMOOTH_BLEND
+    return self
 
 
 class TransitionCandidateKind(str, Enum):

@@ -3,8 +3,8 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from engine.domain.enums import StartMode, TransitionType
-from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
+from engine.domain.enums import StartMode
+from engine.domain.models import MixSession, MixSessionTrack, Track
 from engine.mix_generator.scoring import _track_energy, score_candidate
 from engine.mix_generator.transition_points import resolve_play_until
 from engine.mix_generator.wave_energy import scoring_energy_weight, wave_target_energy
@@ -148,7 +148,6 @@ class MixGenerator:
       used_ids.add(best.id)
 
     session_tracks: list[MixSessionTrack] = []
-    transitions: list[PlannedTransition] = []
 
     for index, track in enumerate(ordered):
       assert track.id is not None
@@ -166,22 +165,8 @@ class MixGenerator:
         )
       )
 
-      if index + 1 < len(ordered):
-        next_track = ordered[index + 1]
-        assert next_track.id is not None
-        start_at = play_until if play_until is not None else (track.duration or 0.0) * 0.85
-        transitions.append(
-          PlannedTransition(
-            from_track_id=track.id,
-            to_track_id=next_track.id,
-            type=TransitionType.CROSSFADE,
-            start_at_sec=start_at,
-            crossfade_duration_sec=self._config.crossfade_duration_sec,
-          )
-        )
-
     return MixSession(
       tracks=session_tracks,
-      transitions=transitions,
+      transitions=[],
       start_mode=start_mode,
     )

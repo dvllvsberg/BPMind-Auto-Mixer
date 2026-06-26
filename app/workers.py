@@ -14,7 +14,9 @@ from engine.domain.enums import AnalysisLevel, StartMode
 from engine.domain.models import Track
 from engine.library.library_profile import compute_library_profile, load_library_profile, save_library_profile
 from engine.mix_generator.recipe_metadata import MixRecipeMetadata
-from engine.mix_generator.mix_generator import MixGenerator, MixGeneratorError
+from engine.mix_generator.mix_generator import MixGeneratorConfig, MixGeneratorError
+from engine.mix_pipeline import build_mix_session
+from engine.transitions.modes import TransitionMode
 from engine.export.session_renderer import SessionExportError, export_session
 from engine.mix_generator.recipe_library import validate_recipe_tracks
 from engine.mix_generator.session_store import load_mix_recipe, save_mix_session
@@ -176,12 +178,14 @@ class MixBuildWorker(QThread):
           self.failed.emit("Нет проанализированных треков. Сначала выполните сканирование и анализ.")
           return
 
-        generator = MixGenerator(config)
-        session = generator.generate(
+        generator_config = config
+        session = build_mix_session(
           tracks,
           self._mode,
+          generator_config,
           start_track_id=self._start_track_id,
-          seed=self._seed,
+          mix_seed=self._seed,
+          transition_mode=TransitionMode.AUTO,
         )
 
       output = default_mix_path()

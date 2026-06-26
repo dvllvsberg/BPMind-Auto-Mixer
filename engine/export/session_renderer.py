@@ -9,7 +9,8 @@ import soundfile as sf
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
 from engine.playback.audio_loader import load_audio_segment
 from engine.playback.timeline_plan import build_session_timeline
-from engine.transitions.crossfade import crossfade_segments, resample_audio
+from engine.transitions.crossfade import resample_audio
+from engine.transitions.mixer import mix_transition_segments
 
 OUTPUT_SR = 44100
 OUTPUT_CHANNELS = 2
@@ -45,9 +46,10 @@ def _effective_until(item: MixSessionTrack, track: Track) -> float | None:
   return track.duration
 
 
-def _build_crossfade_audio(
+def _build_transition_audio(
   outgoing_track: Track,
   incoming_track: Track,
+  transition: PlannedTransition,
   main_end: float,
   until_sec: float,
   incoming_from_sec: float,
@@ -61,7 +63,7 @@ def _build_crossfade_audio(
 
   tail = _normalize_audio(tail, sr_tail)
   head = _normalize_audio(head, sr_head)
-  return crossfade_segments(tail, head)
+  return mix_transition_segments(transition.type, tail, head)
 
 
 def _render_track_segment(
@@ -108,9 +110,10 @@ def _render_track_segment(
     next_item = session.tracks[index + 1]
     next_track = tracks_by_id.get(next_item.track_id)
     if next_track is not None and main_end is not None:
-      mixed = _build_crossfade_audio(
+      mixed = _build_transition_audio(
         track,
         next_track,
+        next_transition,
         main_end,
         until_sec,
         next_item.play_from_sec,

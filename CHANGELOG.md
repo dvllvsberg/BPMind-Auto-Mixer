@@ -2,21 +2,42 @@
 
 ## [Unreleased]
 
-См. план **v1.2** (Transition Engine) ниже.
+См. план v1.3 (доп. профили TEA) ниже.
 
-## [1.2.0] — план (Transition Engine)
+## [1.3.0] — план
 
-- **Smart Transition Engine (TEA)** — отдельный этап после Mix Builder
-- Режим **auto** (умный выбор по контексту) — по умолчанию для пользователя
-- Режимы **fixed** / **random** — только CLI и отладка
-- Профили переходов: smooth blend, filter sweep, echo out, … (см. [docs/transition-engine.md](docs/transition-engine.md))
-- Единый DSP-путь для плеера и экспорта
+- Профили: echo out, bass swap, reverse reverb
+- Составные цепочки переходов
+- См. [docs/transition-engine.md](docs/transition-engine.md)
 
 ## [2.0.0] — будущее
 
 - Новый интерфейс (визуальный редизайн, VHS/Y2K и т.д.)
 - Визуализация типов переходов на таймлайне
-- Составные цепочки переходов (post-MVP TEA)
+
+---
+
+## [1.2.0] — 2026-06-27
+
+Smart Transition Engine: умный выбор переходов между треками.
+
+### Добавлено
+
+- **TEA** — отдельный этап после Mix Builder (`engine/mix_pipeline.py`)
+- Авто-режим: **плавный** и **фильтр (LP)** по контексту пары треков (BPM, groove, громкость)
+- **Резкий** переход — только CLI (`--transition-mode fixed --transition cut`), не в авто
+- Режимы **fixed** / **random** для отладки в CLI
+- Подписи переходов в GUI: сводка сета и стрелки в списке треков
+- Единый DSP для плеера и экспорта; legacy `crossfade` → `smooth_blend`
+- 69 автотестов
+
+### CLI
+
+```powershell
+python run_engine.py mix --mode wave
+python run_engine.py mix --transition-mode fixed --transition filter_sweep
+python run_engine.py mix --transition-mode random --seed 42
+```
 
 ---
 
@@ -30,7 +51,6 @@
 - Список сохранённых сетов в GUI (двойной клик — открыть)
 - Seed для random/wave в «Дополнительно» (CLI и продвинутые сценарии); сохраняется в рецептах
 - Документация Smart Transition Engine: [docs/transition-engine.md](docs/transition-engine.md)
-- 57 автотестов
 
 ---
 
@@ -47,8 +67,3 @@
 - GUI: воспроизведение, таймлайн, seek, сохранение/загрузка рецептов
 - Экспорт в WAV и MP3
 - CLI (`run_engine.py`) для анализа, микса, воспроизведения и экспорта
-- 56 автотестов
-
-### Запланировано
-
-См. секции **v1.1** и **2.0** в [CHANGELOG.md](CHANGELOG.md).

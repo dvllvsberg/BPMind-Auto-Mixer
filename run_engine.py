@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from engine.analysis.quick_analysis_runner import QuickAnalysisRunner
 from engine.analysis.deep_analysis_runner import DeepAnalysisRunner
 from engine.database.repository import TrackRepository
-from engine.domain.enums import StartMode
+from engine.domain.enums import StartMode, TransitionType
 from engine.domain.models import Track
 from app.mix_settings import resolve_mix_config
 from app.paths import default_library_profile_path, exports_dir
@@ -21,8 +21,11 @@ from engine.export.session_renderer import SessionExportError, export_session
 from engine.library.library_profile import load_library_profile
 from engine.mix_generator.recipe_library import recipe_file_stem, validate_recipe_tracks
 from engine.mix_generator.session_store import load_mix_recipe, load_mix_session, save_mix_session
-from engine.mix_generator.mix_generator import MixGenerator, MixGeneratorError
+from engine.mix_generator.mix_generator import MixGeneratorError
+from engine.mix_pipeline import build_mix_session
 from engine.playback.play_cli import run_player
+from engine.transitions.modes import TransitionMode
+from engine.transitions.planner import TransitionPlanConfig
 from engine.playback.session_player import SessionPlayer
 from engine.scanning.library_scanner import LibraryScanner
 
@@ -270,17 +273,42 @@ def cmd_mix(args: argparse.Namespace) -> int:
   if args.crossfade is not None:
     config = replace(config, crossfade_duration_sec=args.crossfade)
 
+  try:
+    transition_mode = TransitionMode(args.transition_mode)
+  except ValueError:
+    print(f"Неизвестный режим переходов: {args.transition_mode}")
+    print("Доступно: auto, fixed, random")
+    return 1
+
+  fixed_profile = TransitionType.SMOOTH_BLEND
+  if args.transition:
+    try:
+      fixed_profile = TransitionType.parse(args.transition)
+    except ValueError:
+      print(f"Неизвестный профиль перехода: {args.transition}")
+      print("Доступно: smooth_blend, cut, filter_sweep")
+      return 1
+
+  plan_config = TransitionPlanConfig(
+    mode=transition_mode,
+    fixed_profile=fixed_profile,
+    crossfade_duration_sec=config.crossfade_duration_sec,
+    seed=args.transition_seed if args.transition_seed is not None else args.seed,
+  )
+
   with TrackRepository(db_path) as repo:
     tracks = repo.list_mixable()
     track_by_id = {track.id: track for track in tracks if track.id is not None}
 
     try:
-      generator = MixGenerator(config)
-      session = generator.generate(
+      session = build_mix_session(
         tracks,
         start_mode,
+        config,
         start_track_id=args.start_track,
-        seed=args.seed,
+        mix_seed=args.seed,
+        transition_mode=transition_mode,
+        transition_plan_config=plan_config,
       )
     except MixGeneratorError as exc:
       print(f"Ошибка: {exc}")
@@ -291,6 +319,7 @@ def cmd_mix(args: argparse.Namespace) -> int:
 
   print(f"Mix Session ({session.start_mode.value})")
   print(f"  Треков: {len(session.tracks)}")
+  print(f"  Переходы: {transition_mode.value}")
   print(f"  Сохранено: {output_path}")
   print()
 
@@ -301,7 +330,12 @@ def cmd_mix(args: argparse.Namespace) -> int:
     bpm = f"{track.bpm:.1f}" if track.bpm else "—"
     label = f"{track.artist} — {track.title}".strip(" —")
     until = f"{item.play_until_sec:.0f}s" if item.play_until_sec else "полностью"
-    print(f"  {index:>2}. [{bpm:>5} BPM] {label}  -> do {until}")
+    transition = next(
+      (tr for tr in session.transitions if tr.from_track_id == item.track_id),
+      None,
+    )
+    suffix = f"  [{transition.type.value}]" if transition is not None else ""
+    print(f"  {index:>2}. [{bpm:>5} BPM] {label}  -> do {until}{suffix}")
 
   return 0
 
@@ -452,7 +486,22 @@ def main() -> int:
   mix_parser.add_argument("--start-track", type=int, help="ID стартового трека для from_track")
   mix_parser.add_argument("--length", type=int, help="Длина сессии в треках")
   mix_parser.add_argument("--crossfade", type=float, help="Длительность crossfade в секундах")
-  mix_parser.add_argument("--seed", type=int, help="Seed для воспроизводимости random")
+  mix_parser.add_argument("--seed", type=int, help="Seed для воспроизводимости random (микс и random-переходы)")
+  mix_parser.add_argument(
+    "--transition-mode",
+    default="auto",
+    choices=["auto", "fixed", "random"],
+    help="Режим выбора переходов (по умолчанию: auto)",
+  )
+  mix_parser.add_argument(
+    "--transition",
+    help="Профиль для fixed: smooth_blend, cut, filter_sweep",
+  )
+  mix_parser.add_argument(
+    "--transition-seed",
+    type=int,
+    help="Seed только для random-переходов (иначе --seed)",
+  )
   mix_parser.add_argument("--output", help="Путь для сохранения mix JSON")
   mix_parser.set_defaults(func=cmd_mix)
 

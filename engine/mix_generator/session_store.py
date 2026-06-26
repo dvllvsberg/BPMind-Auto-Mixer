@@ -90,7 +90,7 @@ def _session_from_dict(data: dict) -> MixSession:
       PlannedTransition(
         from_track_id=item["from_track_id"],
         to_track_id=item["to_track_id"],
-        type=TransitionType(item["type"]),
+        type=TransitionType.parse(item["type"]),
         start_at_sec=item["start_at_sec"],
         crossfade_duration_sec=item.get("crossfade_duration_sec", 8.0),
       )
