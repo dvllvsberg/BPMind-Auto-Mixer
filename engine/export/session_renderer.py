@@ -8,9 +8,17 @@ import soundfile as sf
 
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
 from engine.playback.audio_loader import load_audio_segment
+from engine.playback.incoming_main import load_incoming_main_audio
 from engine.playback.timeline_plan import build_session_timeline
 from engine.transitions.crossfade import resample_audio
-from engine.transitions.mixer import mix_transition_segments
+from engine.transitions.playback_rules import (
+  incoming_play_start_sec,
+  outgoing_tape_brake_sec,
+  outgoing_tape_tail_sec,
+  transition_is_solo_tail,
+)
+from engine.transitions.tape_handoff import soften_tape_boundary_dip
+from engine.transitions.render_overlap import render_transition_overlap
 
 OUTPUT_SR = 44100
 OUTPUT_CHANNELS = 2
@@ -55,15 +63,26 @@ def _build_transition_audio(
   incoming_from_sec: float,
   fade_sec: float,
 ) -> np.ndarray:
-  tail, sr_tail = load_audio_segment(outgoing_track.path, main_end, until_sec)
-  head, sr_head = load_audio_segment(incoming_track.path, incoming_from_sec, incoming_from_sec + fade_sec)
+  tail_end = until_sec
+  if transition_is_solo_tail(transition.type):
+    tail_end = main_end + outgoing_tape_brake_sec(transition)
 
-  if len(tail) == 0 or len(head) == 0:
+  tail, sr_tail = load_audio_segment(outgoing_track.path, main_end, tail_end)
+
+  if len(tail) == 0:
     return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
 
   tail = _normalize_audio(tail, sr_tail)
+
+  if transition_is_solo_tail(transition.type):
+    return render_transition_overlap(transition, tail, np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32))
+
+  head, sr_head = load_audio_segment(incoming_track.path, incoming_from_sec, incoming_from_sec + fade_sec)
+  if len(head) == 0:
+    return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
+
   head = _normalize_audio(head, sr_head)
-  return mix_transition_segments(transition.type, tail, head)
+  return render_transition_overlap(transition, tail, head)
 
 
 def _render_track_segment(
@@ -78,15 +97,22 @@ def _render_track_segment(
   track = tracks_by_id[item.track_id]
 
   start_sec = item.play_from_sec
+  prev_transition: PlannedTransition | None = None
   if index > 0 and enable_crossfade:
     prev_item = session.tracks[index - 1]
     prev_transition = transitions_by_from.get(prev_item.track_id)
-    if prev_transition and prev_transition.to_track_id == item.track_id:
-      start_sec = item.play_from_sec + prev_transition.crossfade_duration_sec
+    start_sec = incoming_play_start_sec(
+      item.play_from_sec,
+      prev_transition,
+      enable_crossfade=True,
+      incoming_track_id=item.track_id,
+    )
 
   until_sec = _effective_until(item, track)
   next_transition = transitions_by_from.get(item.track_id) if index + 1 < len(session.tracks) else None
   fade_sec = next_transition.crossfade_duration_sec if next_transition and enable_crossfade else 0.0
+  if next_transition is not None and enable_crossfade and transition_is_solo_tail(next_transition.type):
+    fade_sec = outgoing_tape_tail_sec(next_transition)
 
   main_end = until_sec
   if until_sec is not None and fade_sec > 0:
@@ -95,8 +121,15 @@ def _render_track_segment(
   parts: list[np.ndarray] = []
 
   if main_end is not None and main_end > start_sec:
-    main_audio, sr = load_audio_segment(track.path, start_sec, main_end)
-    main_audio = _normalize_audio(main_audio, sr)
+    main_audio = load_incoming_main_audio(
+      track.path,
+      start_sec,
+      main_end,
+      prev_transition,
+      enable_crossfade=enable_crossfade,
+      incoming_track_id=item.track_id,
+      normalize_fn=_normalize_audio,
+    )
     if len(main_audio) > 0:
       parts.append(main_audio)
 
@@ -161,7 +194,14 @@ def render_session_audio(
   if not chunks:
     raise SessionExportError("В миксе нет треков для экспорта")
 
-  return np.concatenate(chunks, axis=0)
+  audio = np.concatenate(chunks, axis=0)
+  boundary = 0
+  for index in range(1, len(chunks)):
+    prev_transition = transitions_by_from.get(session.tracks[index - 1].track_id)
+    boundary += len(chunks[index - 1])
+    if prev_transition is not None and transition_is_solo_tail(prev_transition.type):
+      audio = soften_tape_boundary_dip(audio, boundary)
+  return audio
 
 
 def _validate_rendered_audio(

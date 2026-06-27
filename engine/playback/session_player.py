@@ -11,9 +11,17 @@ import sounddevice as sd
 
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
 from engine.playback.audio_loader import load_audio_segment
-from engine.playback.timeline_plan import SessionTimeline, build_session_timeline
+from engine.playback.incoming_main import load_incoming_main_audio
+from engine.playback.timeline_plan import SessionTimeline, TrackOutputPlan, build_session_timeline
 from engine.transitions.crossfade import resample_audio
-from engine.transitions.mixer import mix_transition_segments
+from engine.transitions.playback_rules import (
+  incoming_play_start_sec,
+  outgoing_tape_brake_sec,
+  outgoing_tape_tail_sec,
+  transition_is_solo_tail,
+)
+from engine.transitions.render_overlap import render_transition_overlap
+from engine.transitions.tape_handoff import blend_tape_track_seam
 
 OUTPUT_SR = 44100
 OUTPUT_CHANNELS = 2
@@ -84,17 +92,27 @@ class SessionPlayer:
     self._timeline: SessionTimeline | None = None
     self._lock = threading.Lock()
     self._thread: threading.Thread | None = None
-    self._preload_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bpmind-preload")
+    self._preload_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="bpmind-preload")
+    self._handoff_consumed_index: int | None = None
+    self._incoming_preload_index: int | None = None
+    self._incoming_preload_future: Future[np.ndarray] | None = None
+    self._incoming_preload_cache: dict[int, np.ndarray] = {}
 
   @property
   def state(self) -> PlayerState:
     with self._lock:
       return self._state
 
+  def _resolved_track_index(self) -> int:
+    """Трек, соответствующий session_position_sec (актуален при continuous handoff)."""
+    if self._state is PlayerState.STOPPED or self._timeline is None or not self._timeline.tracks:
+      return self._index
+    return self._timeline.locate(self._session_position_sec).track_index
+
   @property
   def current_index(self) -> int:
     with self._lock:
-      return self._index
+      return self._resolved_track_index()
 
   @property
   def timeline(self) -> SessionTimeline | None:
@@ -105,8 +123,9 @@ class SessionPlayer:
     with self._lock:
       total = self._timeline.total_duration_sec if self._timeline else 0.0
       track_output = 0.0
-      if self._timeline and 0 <= self._index < len(self._timeline.tracks):
-        track_output = self._timeline.tracks[self._index].output_duration_sec
+      resolved = self._resolved_track_index()
+      if self._timeline and 0 <= resolved < len(self._timeline.tracks):
+        track_output = self._timeline.tracks[resolved].output_duration_sec
       return PlaybackStatus(
         session_position_sec=self._session_position_sec,
         session_duration_sec=total,
@@ -129,18 +148,20 @@ class SessionPlayer:
       self._frame_position = 0
       self._skip_requested = True
       self._session_position_sec = max(0.0, min(session_sec, self._timeline.total_duration_sec))
+      self._handoff_consumed_index = None
       return True
 
   def now_playing(self) -> NowPlaying | None:
     with self._lock:
-      if self._index < 0 or self._index >= len(self._session.tracks):
+      index = self._resolved_track_index()
+      if index < 0 or index >= len(self._session.tracks):
         return None
-      item = self._session.tracks[self._index]
+      item = self._session.tracks[index]
       track = self._tracks_by_id.get(item.track_id)
       if track is None:
         return None
       return NowPlaying(
-        index=self._index + 1,
+        index=index + 1,
         total=len(self._session.tracks),
         track=track,
         session_item=item,
@@ -171,6 +192,8 @@ class SessionPlayer:
         self._session_position_sec = self._timeline.tracks[start_index].session_offset_sec
       self._track_local_output_sec = 0.0
       self._seek_local_output_sec = None
+      self._handoff_consumed_index = None
+      self._clear_incoming_preload()
       self._state = PlayerState.PLAYING
       self._thread = threading.Thread(target=self._run, daemon=True)
       self._thread.start()
@@ -233,6 +256,8 @@ class SessionPlayer:
       self._jump_requested = index
       self._frame_position = 0
       self._seek_local_output_sec = None
+      self._clear_incoming_preload()
+      self._handoff_consumed_index = None
       self._skip_requested = True
       if self._timeline is not None and index < len(self._timeline.tracks):
         self._session_position_sec = self._timeline.tracks[index].session_offset_sec
@@ -245,6 +270,126 @@ class SessionPlayer:
 
   def _transition_from(self, track_id: int) -> PlannedTransition | None:
     return self._transitions_by_from.get(track_id)
+
+  def _clear_incoming_preload(self) -> None:
+    future = self._incoming_preload_future
+    self._incoming_preload_index = None
+    self._incoming_preload_future = None
+    self._incoming_preload_cache.clear()
+    if future is not None and not future.done():
+      future.cancel()
+
+  def _track_output_plan(self, index: int) -> TrackOutputPlan | None:
+    with self._lock:
+      timeline = self._timeline
+    if timeline is None or index < 0 or index >= len(timeline.tracks):
+      return None
+    return timeline.tracks[index]
+
+  def _warmup_futures(self, *futures: Future | None) -> None:
+    for future in futures:
+      if future is not None and not future.done():
+        future.result()
+
+  def _outgoing_transition_to_next(self, index: int, *, skip_crossfade: bool) -> PlannedTransition | None:
+    if skip_crossfade or not self._enable_crossfade or index + 1 >= len(self._session.tracks):
+      return None
+    return self._transition_from(self._session.tracks[index].track_id)
+
+  def _continuous_handoff_to_next(self, index: int, *, skip_crossfade: bool) -> bool:
+    return self._outgoing_transition_to_next(index, skip_crossfade=skip_crossfade) is not None
+
+  def _tape_handoff_to_next(self, index: int, *, skip_crossfade: bool) -> bool:
+    next_transition = self._outgoing_transition_to_next(index, skip_crossfade=skip_crossfade)
+    return next_transition is not None and transition_is_solo_tail(next_transition.type)
+
+  def _ensure_incoming_preload_complete(self, index: int) -> None:
+    cached = self._incoming_preload_cache.get(index)
+    if cached is not None:
+      return
+    future = self._incoming_preload_future
+    if future is None or self._incoming_preload_index != index:
+      return
+    self._incoming_preload_index = None
+    self._incoming_preload_future = None
+    try:
+      self._incoming_preload_cache[index] = future.result()
+    except Exception:
+      pass
+
+  def _build_incoming_main_for_index(self, index: int, *, skip_crossfade: bool) -> np.ndarray:
+    item = self._session.tracks[index]
+    track = self._tracks_by_id.get(item.track_id)
+    if track is None:
+      return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
+
+    start_sec = item.play_from_sec
+    prev_transition: PlannedTransition | None = None
+    if index > 0 and self._enable_crossfade and not skip_crossfade:
+      prev_item = self._session.tracks[index - 1]
+      prev_transition = self._transition_from(prev_item.track_id)
+      start_sec = incoming_play_start_sec(
+        item.play_from_sec,
+        prev_transition,
+        enable_crossfade=True,
+        incoming_track_id=item.track_id,
+      )
+
+    until_sec = self._effective_until(item, track)
+    next_transition = self._transition_from(item.track_id) if index + 1 < len(self._session.tracks) else None
+    fade_sec = next_transition.crossfade_duration_sec if next_transition and self._enable_crossfade else 0.0
+    if next_transition is not None and self._enable_crossfade and transition_is_solo_tail(next_transition.type):
+      fade_sec = outgoing_tape_tail_sec(next_transition)
+    if skip_crossfade:
+      fade_sec = 0.0
+
+    main_end = until_sec
+    if until_sec is not None and fade_sec > 0:
+      main_end = max(start_sec, until_sec - fade_sec)
+    if main_end is None or main_end <= start_sec:
+      return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
+
+    return load_incoming_main_audio(
+      track.path,
+      start_sec,
+      main_end,
+      prev_transition,
+      enable_crossfade=self._enable_crossfade and not skip_crossfade,
+      incoming_track_id=item.track_id,
+      normalize_fn=_normalize_audio,
+    )
+
+  def _schedule_incoming_preload(self, index: int, *, skip_crossfade: bool) -> None:
+    if skip_crossfade or not self._enable_crossfade:
+      return
+    if index + 1 >= len(self._session.tracks):
+      return
+    self._clear_incoming_preload()
+    next_index = index + 1
+    self._incoming_preload_index = next_index
+    self._incoming_preload_future = self._preload_executor.submit(
+      self._build_incoming_main_for_index,
+      next_index,
+      skip_crossfade=skip_crossfade,
+    )
+
+  def _load_incoming_main_for_index(self, index: int, *, skip_crossfade: bool) -> np.ndarray:
+    cached = self._incoming_preload_cache.pop(index, None)
+    if cached is not None:
+      return cached
+    future = self._incoming_preload_future
+    if (
+      not skip_crossfade
+      and future is not None
+      and self._incoming_preload_index == index
+    ):
+      self._incoming_preload_index = None
+      self._incoming_preload_future = None
+      try:
+        return future.result()
+      except Exception:
+        pass
+    return self._build_incoming_main_for_index(index, skip_crossfade=skip_crossfade)
 
   def _effective_until(self, item: MixSessionTrack, track: Track) -> float | None:
     if item.play_until_sec is not None:
@@ -282,8 +427,22 @@ class SessionPlayer:
           with self._lock:
             skip_crossfade = self._skip_requested
 
+          seek_local: float | None = None
+          with self._lock:
+            if self._seek_local_output_sec is not None:
+              seek_local = self._seek_local_output_sec
+              self._seek_local_output_sec = None
+              skip_crossfade = False
+
           try:
-            if not self._play_track_segment(index, item, track, stream, skip_crossfade=skip_crossfade):
+            if not self._play_track_segment(
+              index,
+              item,
+              track,
+              stream,
+              skip_crossfade=skip_crossfade,
+              seek_local=seek_local,
+            ):
               return
           except sd.PortAudioError:
             with self._lock:
@@ -300,8 +459,12 @@ class SessionPlayer:
               self._index = self._jump_requested
               self._jump_requested = None
               self._skip_requested = False
+              self._clear_incoming_preload()
+              self._handoff_consumed_index = None
             elif self._skip_requested:
               self._skip_requested = False
+              self._clear_incoming_preload()
+              self._handoff_consumed_index = None
               if self._index + 1 < len(self._session.tracks):
                 self._index += 1
               else:
@@ -323,15 +486,26 @@ class SessionPlayer:
     incoming_from_sec: float,
     fade_sec: float,
   ) -> np.ndarray:
-    tail, sr_tail = load_audio_segment(outgoing_track.path, main_end, until_sec)
-    head, sr_head = load_audio_segment(incoming_track.path, incoming_from_sec, incoming_from_sec + fade_sec)
+    tail_end = until_sec
+    if transition_is_solo_tail(transition.type):
+      tail_end = main_end + outgoing_tape_brake_sec(transition)
 
-    if len(tail) == 0 or len(head) == 0:
+    tail, sr_tail = load_audio_segment(outgoing_track.path, main_end, tail_end)
+
+    if len(tail) == 0:
       return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
 
     tail = _normalize_audio(tail, sr_tail)
+
+    if transition_is_solo_tail(transition.type):
+      return render_transition_overlap(transition, tail, np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32))
+
+    head, sr_head = load_audio_segment(incoming_track.path, incoming_from_sec, incoming_from_sec + fade_sec)
+    if len(head) == 0:
+      return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
+
     head = _normalize_audio(head, sr_head)
-    return mix_transition_segments(transition.type, tail, head)
+    return render_transition_overlap(transition, tail, head)
 
   def _play_track_segment(
     self,
@@ -341,18 +515,26 @@ class SessionPlayer:
     stream: sd.OutputStream,
     *,
     skip_crossfade: bool,
+    seek_local: float | None = None,
   ) -> bool:
     start_sec = item.play_from_sec
+    prev_transition: PlannedTransition | None = None
 
     if index > 0 and self._enable_crossfade and not skip_crossfade:
       prev_item = self._session.tracks[index - 1]
       prev_transition = self._transition_from(prev_item.track_id)
-      if prev_transition and prev_transition.to_track_id == item.track_id:
-        start_sec = item.play_from_sec + prev_transition.crossfade_duration_sec
+      start_sec = incoming_play_start_sec(
+        item.play_from_sec,
+        prev_transition,
+        enable_crossfade=True,
+        incoming_track_id=item.track_id,
+      )
 
     until_sec = self._effective_until(item, track)
     next_transition = self._transition_from(item.track_id) if index + 1 < len(self._session.tracks) else None
     fade_sec = next_transition.crossfade_duration_sec if next_transition and self._enable_crossfade else 0.0
+    if next_transition is not None and self._enable_crossfade and transition_is_solo_tail(next_transition.type):
+      fade_sec = outgoing_tape_tail_sec(next_transition)
 
     if skip_crossfade:
       fade_sec = 0.0
@@ -361,9 +543,14 @@ class SessionPlayer:
     if until_sec is not None and fade_sec > 0:
       main_end = max(start_sec, until_sec - fade_sec)
 
-    main_duration = 0.0
-    if main_end is not None and main_end > start_sec:
-      main_duration = main_end - start_sec
+    plan = self._track_output_plan(index)
+    if plan is not None and not skip_crossfade:
+      main_duration = plan.main_duration_sec
+      fade_sec = plan.crossfade_duration_sec
+    else:
+      main_duration = 0.0
+      if main_end is not None and main_end > start_sec:
+        main_duration = main_end - start_sec
 
     crossfade_future: Future[np.ndarray] | None = None
     if (
@@ -387,12 +574,15 @@ class SessionPlayer:
           next_item.play_from_sec,
           fade_sec,
         )
-
-    seek_local: float | None = None
-    with self._lock:
-      if self._seek_local_output_sec is not None:
-        seek_local = self._seek_local_output_sec
-        self._seek_local_output_sec = None
+        self._schedule_incoming_preload(index, skip_crossfade=skip_crossfade)
+    elif (
+      not skip_crossfade
+      and self._enable_crossfade
+      and index + 1 < len(self._session.tracks)
+      and main_end is not None
+      and main_end > start_sec
+    ):
+      self._schedule_incoming_preload(index, skip_crossfade=skip_crossfade)
 
     if seek_local is not None and seek_local >= main_duration and crossfade_future is not None:
       mixed = crossfade_future.result()
@@ -408,24 +598,65 @@ class SessionPlayer:
       return True
 
     if main_end is None or main_end > start_sec:
-      main_audio, sr = load_audio_segment(track.path, start_sec, main_end)
-      main_audio = _normalize_audio(main_audio, sr)
-      if len(main_audio) > 0:
-        initial_frame = 0
-        if seek_local is not None:
-          initial_frame = int(min(seek_local, main_duration) * OUTPUT_SR)
-        if not self._play_audio(
-          main_audio,
-          stream,
-          output_offset_sec=0.0,
-          initial_frame=initial_frame,
-        ):
-          return False
+      skip_incoming_main = seek_local is None and self._handoff_consumed_index == index
+      if skip_incoming_main:
+        self._handoff_consumed_index = None
+      if not skip_incoming_main:
+        main_audio = self._load_incoming_main_for_index(index, skip_crossfade=skip_crossfade)
+        if len(main_audio) > 0:
+          initial_frame = 0
+          if seek_local is not None:
+            initial_frame = int(min(seek_local, main_duration) * OUTPUT_SR)
+          warmup: list[Future | None] = [crossfade_future]
+          if self._continuous_handoff_to_next(index, skip_crossfade=skip_crossfade):
+            warmup.append(self._incoming_preload_future)
+          if not self._play_audio(
+            main_audio,
+            stream,
+            output_offset_sec=0.0,
+            initial_frame=initial_frame,
+            warmup_futures=tuple(warmup),
+          ):
+            return False
+          with self._lock:
+            if self._skip_requested:
+              return True
 
     if crossfade_future is not None:
+      with self._lock:
+        if self._skip_requested:
+          return True
+      continuous_handoff = self._continuous_handoff_to_next(index, skip_crossfade=skip_crossfade)
+      is_tape_handoff = self._tape_handoff_to_next(index, skip_crossfade=skip_crossfade)
+      if continuous_handoff:
+        self._ensure_incoming_preload_complete(index + 1)
+      self._warmup_futures(crossfade_future)
       mixed = crossfade_future.result()
-      if len(mixed) > 0 and not self._play_audio(mixed, stream, output_offset_sec=main_duration):
-        return False
+      incoming_audio: np.ndarray | None = None
+      next_plan: TrackOutputPlan | None = None
+      if continuous_handoff:
+        incoming_audio = self._load_incoming_main_for_index(index + 1, skip_crossfade=skip_crossfade)
+        next_plan = self._track_output_plan(index + 1)
+      if len(mixed) > 0:
+        handoff_tail: np.ndarray | None = None
+        if is_tape_handoff:
+          overlap = int(round(0.14 * OUTPUT_SR))
+          if len(mixed) > overlap:
+            handoff_tail = mixed[-overlap:].copy()
+            mixed = mixed[:-overlap]
+        if len(mixed) > 0 and not self._play_audio(mixed, stream, output_offset_sec=main_duration):
+          return False
+        if continuous_handoff and incoming_audio is not None and len(incoming_audio) > 0:
+          if is_tape_handoff and handoff_tail is not None:
+            incoming_audio = blend_tape_track_seam(handoff_tail, incoming_audio)
+          if not self._play_audio(
+            incoming_audio,
+            stream,
+            output_offset_sec=0.0,
+            position_plan=next_plan,
+          ):
+            return False
+          self._handoff_consumed_index = index + 1
 
     return True
 
@@ -436,12 +667,14 @@ class SessionPlayer:
     *,
     output_offset_sec: float = 0.0,
     initial_frame: int = 0,
+    position_plan: TrackOutputPlan | None = None,
+    warmup_futures: tuple[Future | None, ...] = (),
   ) -> bool:
     with self._lock:
       start_frame = initial_frame if initial_frame > 0 else self._frame_position
       self._frame_position = 0
-      plan = None
-      if self._timeline and 0 <= self._index < len(self._timeline.tracks):
+      plan = position_plan
+      if plan is None and self._timeline and 0 <= self._index < len(self._timeline.tracks):
         plan = self._timeline.tracks[self._index]
 
     if audio.ndim == 1:
@@ -450,8 +683,17 @@ class SessionPlayer:
       audio = np.repeat(audio, 2, axis=1)
 
     position = start_frame
+    warmup_started = False
+    warmup_frame = max(0, len(audio) - int(2.0 * OUTPUT_SR))
 
     while position < len(audio):
+      if (
+        not warmup_started
+        and warmup_futures
+        and position >= warmup_frame
+      ):
+        self._warmup_futures(*warmup_futures)
+        warmup_started = True
       with self._lock:
         if self._stop_requested:
           self._state = PlayerState.STOPPED

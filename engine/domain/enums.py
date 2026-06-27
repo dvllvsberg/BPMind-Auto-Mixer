@@ -19,6 +19,12 @@ class TransitionType(str, Enum):
   SMOOTH_BLEND = "smooth_blend"
   CUT = "cut"
   FILTER_SWEEP = "filter_sweep"
+  ECHO_OUT = "echo_out"
+  BASS_SWAP = "bass_swap"
+  TAPE_STOP = "tape_stop"
+  VINYL_BRAKE = "vinyl_brake"
+  REVERSE_SWELL = "reverse_swell"
+  IMPACT = "impact"
   CROSSFADE = "crossfade"  # legacy alias → smooth_blend
 
   @classmethod

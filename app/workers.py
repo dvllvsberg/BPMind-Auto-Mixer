@@ -10,13 +10,14 @@ from app.user_messages import format_user_error
 from engine.analysis.deep_analysis_runner import DeepAnalysisRunner
 from engine.analysis.quick_analysis_runner import QuickAnalysisRunner
 from engine.database.repository import TrackRepository
-from engine.domain.enums import AnalysisLevel, StartMode
+from engine.domain.enums import AnalysisLevel, StartMode, TransitionType
 from engine.domain.models import Track
 from engine.library.library_profile import compute_library_profile, load_library_profile, save_library_profile
 from engine.mix_generator.recipe_metadata import MixRecipeMetadata
 from engine.mix_generator.mix_generator import MixGeneratorConfig, MixGeneratorError
 from engine.mix_pipeline import build_mix_session
 from engine.transitions.modes import TransitionMode
+from engine.transitions.planner import TransitionPlanConfig
 from engine.export.session_renderer import SessionExportError, export_session
 from engine.mix_generator.recipe_library import validate_recipe_tracks
 from engine.mix_generator.session_store import load_mix_recipe, save_mix_session
@@ -160,11 +161,15 @@ class MixBuildWorker(QThread):
     *,
     start_track_id: int | None = None,
     seed: int | None = None,
+    transition_mode: TransitionMode = TransitionMode.AUTO,
+    fixed_transition: TransitionType = TransitionType.SMOOTH_BLEND,
   ) -> None:
     super().__init__()
     self._mode = mode
     self._start_track_id = start_track_id
     self._seed = seed
+    self._transition_mode = transition_mode
+    self._fixed_transition = fixed_transition
 
   def run(self) -> None:
     try:
@@ -179,13 +184,20 @@ class MixBuildWorker(QThread):
           return
 
         generator_config = config
+        plan_config = TransitionPlanConfig(
+          mode=self._transition_mode,
+          fixed_profile=self._fixed_transition,
+          crossfade_duration_sec=config.crossfade_duration_sec,
+          seed=self._seed if self._transition_mode is TransitionMode.RANDOM else None,
+        )
         session = build_mix_session(
           tracks,
           self._mode,
           generator_config,
           start_track_id=self._start_track_id,
           mix_seed=self._seed,
-          transition_mode=TransitionMode.AUTO,
+          transition_mode=self._transition_mode,
+          transition_plan_config=plan_config,
         )
 
       output = default_mix_path()

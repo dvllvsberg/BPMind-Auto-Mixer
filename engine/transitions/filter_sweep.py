@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from engine.transitions.crossfade import crossfade_segments
+from engine.transitions.dsp_utils import one_pole_highpass, progressive_wet_effect
+
 
 def filter_sweep_tail(audio: np.ndarray) -> np.ndarray:
   """LP-sweep на хвосте: к концу сегмента звук заметно «уходит под воду»."""
@@ -19,26 +22,33 @@ def filter_sweep_tail(audio: np.ndarray) -> np.ndarray:
     state = 0.0
     for index in range(length):
       progress = index / max(length - 1, 1)
-      # Квадратичный спад: в начале overlap почти полный сигнал, к концу сильное LP
-      muffled = progress**1.6
-      alpha = 0.88 - muffled * 0.84
-      alpha = max(alpha, 0.04)
+      muffled = progress**1.35
+      alpha = 0.9 - muffled * 0.88
+      alpha = max(alpha, 0.012)
       sample = float(audio[index, channel])
       state = alpha * sample + (1.0 - alpha) * state
-      volume = 1.0 - muffled * 0.35
+      volume = 1.0 - muffled * 0.55
       out[index, channel] = state * volume
 
   return out.astype(np.float32, copy=False)
 
 
+def filter_sweep_incoming_head(audio: np.ndarray) -> np.ndarray:
+  """Краткий HP на голове входящего; к концу overlap — исходный сигнал (без скачка)."""
+  return progressive_wet_effect(
+    audio,
+    lambda signal: one_pole_highpass(signal, alpha=0.86),
+    start_wet=0.55,
+    end_wet=0.0,
+  )
+
+
 def filter_sweep_mix(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
-  """Фильтр на уходящем + обычный crossfade — входящий заходит поверх «приглушённого» хвоста."""
   if outgoing.size == 0:
     return incoming.astype(np.float32, copy=False)
   if incoming.size == 0:
     return outgoing.astype(np.float32, copy=False)
 
-  from engine.transitions.crossfade import crossfade_segments
-
   swept = filter_sweep_tail(outgoing)
-  return crossfade_segments(swept, incoming)
+  filtered_in = filter_sweep_incoming_head(incoming)
+  return crossfade_segments(swept, filtered_in, incoming_delay=0.38, outgoing_release=1.2)

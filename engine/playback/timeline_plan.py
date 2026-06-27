@@ -3,12 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from engine.analysis.intro_entry import intro_skip_sec as detect_intro_skip_sec
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
+from engine.transitions.playback_rules import (
+  incoming_play_start_sec,
+  incoming_tape_spin_sec,
+  outgoing_tape_brake_sec,
+  outgoing_tape_silence_sec,
+  outgoing_tape_tail_sec,
+  transition_is_solo_tail,
+)
 
 
 class RegionKind(str, Enum):
   PLAY = "play"
   CROSSFADE = "crossfade"
+  TAPE_STOP = "tape_stop"
+  TAPE_START = "tape_start"
+  SILENCE = "silence"
   TRIM_START = "trim_start"
   TRIM_END = "trim_end"
 
@@ -102,38 +114,99 @@ def build_track_output_plan(
   if index > 0 and enable_crossfade:
     prev_item = session.tracks[index - 1]
     prev_transition = transitions_by_from.get(prev_item.track_id)
-    if prev_transition and prev_transition.to_track_id == item.track_id:
-      start_sec = item.play_from_sec + prev_transition.crossfade_duration_sec
+    start_sec = incoming_play_start_sec(
+      item.play_from_sec,
+      prev_transition,
+      enable_crossfade=True,
+      incoming_track_id=item.track_id,
+    )
+
+  spin_sec = 0.0
+  intro_skip = 0.0
+  if index > 0 and enable_crossfade:
+    prev_item = session.tracks[index - 1]
+    prev_transition = transitions_by_from.get(prev_item.track_id)
+    spin_sec = incoming_tape_spin_sec(
+      prev_transition,
+      enable_crossfade=True,
+      incoming_track_id=item.track_id,
+    )
+    if spin_sec > 0 and prev_transition is not None and transition_is_solo_tail(prev_transition.type):
+      scan_sec = min(max(spin_sec * 4.0, 12.0), 60.0)
+      intro_skip = detect_intro_skip_sec(track.path, item.play_from_sec, scan_sec=scan_sec)
 
   until_sec = _effective_until(item, track)
   next_transition = transitions_by_from.get(item.track_id) if index + 1 < len(session.tracks) else None
   fade_sec = next_transition.crossfade_duration_sec if next_transition and enable_crossfade else 0.0
+  if next_transition is not None and enable_crossfade and transition_is_solo_tail(next_transition.type):
+    fade_sec = outgoing_tape_tail_sec(next_transition)
+
+  brake_sec = 0.0
+  silence_sec = 0.0
+  if next_transition is not None and enable_crossfade and transition_is_solo_tail(next_transition.type):
+    brake_sec = outgoing_tape_brake_sec(next_transition)
+    silence_sec = outgoing_tape_silence_sec(next_transition)
 
   main_end = until_sec
   if fade_sec > 0:
     main_end = max(start_sec, until_sec - fade_sec)
 
-  main_duration = max(0.0, main_end - start_sec)
+  main_duration = max(0.0, main_end - start_sec - intro_skip)
   output_duration = main_duration + fade_sec
   file_duration = track.duration or until_sec
 
   regions: list[TimelineRegion] = []
   session_start = session_offset_sec
 
-  if item.play_from_sec > 0:
+  if intro_skip > 0:
+    marker = min(2.0, max(0.35, intro_skip * 0.12))
+    regions.append(TimelineRegion(session_start, session_start + marker, RegionKind.TRIM_START))
+  elif item.play_from_sec > 0:
     marker = min(2.0, output_duration * 0.08)
     regions.append(TimelineRegion(session_start, session_start + marker, RegionKind.TRIM_START))
 
   regions.append(TimelineRegion(session_start, session_start + main_duration, RegionKind.PLAY))
 
-  if fade_sec > 0:
-    regions.append(
-      TimelineRegion(
-        session_start + main_duration,
-        session_start + output_duration,
-        RegionKind.CROSSFADE,
-      )
+  spin_duration = min(spin_sec, main_duration) if spin_sec > 0 else 0.0
+  if spin_duration > 0:
+    regions[-1] = TimelineRegion(
+      session_start + spin_duration,
+      session_start + main_duration,
+      RegionKind.PLAY,
     )
+    regions.insert(
+      len(regions) - 1,
+      TimelineRegion(session_start, session_start + spin_duration, RegionKind.TAPE_START),
+    )
+
+  if fade_sec > 0:
+    tail_kind = RegionKind.TAPE_STOP
+    if next_transition is not None and not transition_is_solo_tail(next_transition.type):
+      tail_kind = RegionKind.CROSSFADE
+      regions.append(
+        TimelineRegion(
+          session_start + main_duration,
+          session_start + output_duration,
+          tail_kind,
+        )
+      )
+    else:
+      if brake_sec > 0:
+        regions.append(
+          TimelineRegion(
+            session_start + main_duration,
+            session_start + main_duration + brake_sec,
+            RegionKind.TAPE_STOP,
+          )
+        )
+      if silence_sec > 0:
+        regions.append(
+          TimelineRegion(
+            session_start + main_duration + brake_sec,
+            session_start + output_duration,
+            RegionKind.SILENCE,
+          )
+        )
 
   if file_duration > until_sec:
     marker = min(2.0, output_duration * 0.08)

@@ -37,7 +37,7 @@ from app.paths import (
 from app.ui.timeline_widget import MixTimelineWidget, format_time
 from app.workers import ExportAudioWorker, MixBuildWorker, ScanAnalyzeWorker, track_label
 from engine.database.repository import TrackRepository
-from engine.domain.enums import AnalysisLevel, StartMode
+from engine.domain.enums import AnalysisLevel, StartMode, TransitionType
 from engine.domain.models import MixSession, PlannedTransition, Track
 from engine.library.library_profile import (
   compute_library_profile,
@@ -57,7 +57,13 @@ from engine.mix_generator.recipe_metadata import MixRecipeMetadata
 from engine.mix_generator.session_store import load_mix_recipe, load_mix_session, save_mix_recipe
 from engine.playback.session_player import PlayerState, SessionPlayer
 from engine.playback.timeline_plan import SessionTimeline, build_session_timeline
-from engine.transitions.display import format_transition_arrow, summarize_session_transitions
+from engine.transitions.display import (
+  DEBUG_TRANSITION_PROFILES,
+  format_transition_arrow,
+  summarize_session_transitions,
+  transition_profile_label,
+)
+from engine.transitions.modes import TransitionMode
 
 
 def _start_track_combo_label(track: Track, *, list_index: int) -> str:
@@ -305,6 +311,44 @@ class MainWindow(QWidget):
     seed_row.addWidget(self._seed_spin)
     seed_row.addStretch()
     advanced_layout.addLayout(seed_row)
+
+    self._transition_mode_combo = QComboBox()
+    self._transition_mode_combo.addItem("Авто (DJ)", TransitionMode.AUTO.value)
+    self._transition_mode_combo.addItem("Фиксированный (тест)", TransitionMode.FIXED.value)
+    self._transition_mode_combo.addItem("Случайный", TransitionMode.RANDOM.value)
+    self._transition_mode_combo.setToolTip(
+      "Авто — умный выбор переходов.\n"
+      "Фиксированный — один профиль на все стыковки (удобно слушать tape, удар, реверс).\n"
+      "Случайный — случайный профиль на каждый переход."
+    )
+    self._transition_mode_combo.currentIndexChanged.connect(self._on_transition_mode_changed)
+    self._transition_mode_combo.currentIndexChanged.connect(self._save_transition_settings)
+
+    self._transition_profile_combo = QComboBox()
+    for profile in DEBUG_TRANSITION_PROFILES:
+      self._transition_profile_combo.addItem(
+        transition_profile_label(profile),
+        profile.value,
+      )
+    self._transition_profile_combo.setToolTip("Профиль для режима «Фиксированный (тест)»")
+    self._transition_profile_combo.currentIndexChanged.connect(self._save_transition_settings)
+
+    saved_transition_mode = settings.get("transition_mode", TransitionMode.AUTO.value)
+    mode_index = self._transition_mode_combo.findData(saved_transition_mode)
+    if mode_index >= 0:
+      self._transition_mode_combo.setCurrentIndex(mode_index)
+    saved_profile = settings.get("transition_profile", TransitionType.TAPE_STOP.value)
+    profile_index = self._transition_profile_combo.findData(saved_profile)
+    if profile_index >= 0:
+      self._transition_profile_combo.setCurrentIndex(profile_index)
+    self._on_transition_mode_changed(self._transition_mode_combo.currentIndex())
+
+    transition_row = QHBoxLayout()
+    transition_row.addWidget(QLabel("Переходы:"))
+    transition_row.addWidget(self._transition_mode_combo, stretch=1)
+    transition_row.addWidget(self._transition_profile_combo, stretch=1)
+    advanced_layout.addLayout(transition_row)
+
     reset_row = QHBoxLayout()
     reset_row.addWidget(self._reset_auto_btn)
     reset_row.addStretch()
@@ -510,6 +554,31 @@ class MainWindow(QWidget):
     else:
       settings.pop("mix_seed", None)
     save_settings(settings)
+
+  def _on_transition_mode_changed(self, _index: int) -> None:
+    mode_value = self._transition_mode_combo.currentData()
+    fixed = mode_value == TransitionMode.FIXED.value
+    self._transition_profile_combo.setEnabled(fixed)
+
+  def _save_transition_settings(self, *_args) -> None:
+    settings = load_settings()
+    mode_value = self._transition_mode_combo.currentData()
+    if mode_value:
+      settings["transition_mode"] = mode_value
+    profile_value = self._transition_profile_combo.currentData()
+    if profile_value:
+      settings["transition_profile"] = profile_value
+    save_settings(settings)
+
+  def _current_transition_plan(self) -> tuple[TransitionMode, TransitionType]:
+    mode_value = self._transition_mode_combo.currentData() or TransitionMode.AUTO.value
+    transition_mode = TransitionMode(mode_value)
+    profile_value = self._transition_profile_combo.currentData() or TransitionType.SMOOTH_BLEND.value
+    try:
+      fixed_profile = TransitionType.parse(profile_value)
+    except ValueError:
+      fixed_profile = TransitionType.SMOOTH_BLEND
+    return transition_mode, fixed_profile
 
   def _current_mix_seed(self) -> int | None:
     mode_value = self._mode_combo.currentData()
@@ -885,10 +954,17 @@ class MainWindow(QWidget):
     self._mix_btn.setEnabled(False)
     self._status.setText("Построение микса...")
 
+    transition_mode, fixed_transition = self._current_transition_plan()
+    mix_seed = self._current_mix_seed()
+    if transition_mode is TransitionMode.RANDOM and mix_seed is None:
+      mix_seed = 1
+
     self._mix_worker = MixBuildWorker(
       mode,
       start_track_id=start_track_id,
-      seed=self._current_mix_seed(),
+      seed=mix_seed,
+      transition_mode=transition_mode,
+      fixed_transition=fixed_transition,
     )
     self._mix_worker.finished_ok.connect(self._on_mix_built)
     self._mix_worker.failed.connect(self._on_worker_failed)

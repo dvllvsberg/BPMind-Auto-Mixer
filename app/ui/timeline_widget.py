@@ -9,6 +9,9 @@ from engine.playback.timeline_plan import RegionKind, SessionTimeline
 _REGION_COLORS = {
   RegionKind.PLAY: QColor(70, 130, 200, 180),
   RegionKind.CROSSFADE: QColor(220, 140, 60, 200),
+  RegionKind.TAPE_STOP: QColor(160, 90, 200, 210),
+  RegionKind.TAPE_START: QColor(120, 70, 190, 200),
+  RegionKind.SILENCE: QColor(35, 35, 38, 220),
   RegionKind.TRIM_START: QColor(90, 90, 90, 200),
   RegionKind.TRIM_END: QColor(90, 90, 90, 200),
 }
@@ -35,7 +38,7 @@ class MixTimelineWidget(QWidget):
     self.setMinimumHeight(28)
     self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     self.setToolTip(
-      "Зелёный/синий — воспроизведение, оранжевый — кроссфейд, "
+      "Синий — воспроизведение, оранжевый — кроссфейд, фиолетовый — tape stop/start, "
       "серый — обрезанная тишина. Перетащите для перемотки."
     )
 

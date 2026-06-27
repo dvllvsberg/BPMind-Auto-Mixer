@@ -3,8 +3,18 @@ from __future__ import annotations
 import numpy as np
 
 
-def crossfade_segments(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
-  """Смешать хвост outgoing и начало incoming (линейный crossfade)."""
+def crossfade_segments(
+  outgoing: np.ndarray,
+  incoming: np.ndarray,
+  *,
+  incoming_delay: float = 1.0,
+  outgoing_release: float = 1.0,
+) -> np.ndarray:
+  """Смешать хвост outgoing и начало incoming.
+
+  incoming_delay < 1 — входящий заходит медленнее (эффект на уходящем слышен дольше).
+  outgoing_release > 1 — уходящий гаснет быстрее.
+  """
   if outgoing.ndim == 1:
     outgoing = outgoing.reshape(-1, 1)
   if incoming.ndim == 1:
@@ -18,8 +28,8 @@ def crossfade_segments(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray
   in_head = incoming[:overlap]
 
   ramp = np.linspace(0.0, 1.0, overlap, dtype=np.float32).reshape(-1, 1)
-  fade_out = 1.0 - ramp
-  fade_in = ramp
+  fade_in = np.power(ramp, incoming_delay)
+  fade_out = np.power(1.0 - ramp, outgoing_release)
 
   return (out_tail * fade_out + in_head * fade_in).astype(np.float32)
 

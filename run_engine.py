@@ -286,7 +286,10 @@ def cmd_mix(args: argparse.Namespace) -> int:
       fixed_profile = TransitionType.parse(args.transition)
     except ValueError:
       print(f"Неизвестный профиль перехода: {args.transition}")
-      print("Доступно: smooth_blend, cut, filter_sweep")
+      print(
+        "Доступно: smooth_blend, filter_sweep, echo_out, bass_swap, impact, "
+        "reverse_swell, tape_stop, vinyl_brake, cut"
+      )
       return 1
 
   plan_config = TransitionPlanConfig(
@@ -495,7 +498,8 @@ def main() -> int:
   )
   mix_parser.add_argument(
     "--transition",
-    help="Профиль для fixed: smooth_blend, cut, filter_sweep",
+    help="Профиль для fixed: smooth_blend, filter_sweep, echo_out, bass_swap, impact, "
+    "tape_stop, vinyl_brake, reverse_swell, cut",
   )
   mix_parser.add_argument(
     "--transition-seed",

@@ -9,7 +9,26 @@ _PROFILE_LABELS: dict[TransitionType, str] = {
   TransitionType.SMOOTH_BLEND: "плавный",
   TransitionType.CUT: "резкий",
   TransitionType.FILTER_SWEEP: "фильтр (LP)",
+  TransitionType.ECHO_OUT: "эхо",
+  TransitionType.BASS_SWAP: "бас-своп",
+  TransitionType.TAPE_STOP: "стоп ленты",
+  TransitionType.VINYL_BRAKE: "винил",
+  TransitionType.REVERSE_SWELL: "реверс",
+  TransitionType.IMPACT: "удар",
 }
+
+# Порядок для GUI/CLI (тест редких профилей)
+DEBUG_TRANSITION_PROFILES: tuple[TransitionType, ...] = (
+  TransitionType.SMOOTH_BLEND,
+  TransitionType.FILTER_SWEEP,
+  TransitionType.ECHO_OUT,
+  TransitionType.BASS_SWAP,
+  TransitionType.IMPACT,
+  TransitionType.REVERSE_SWELL,
+  TransitionType.TAPE_STOP,
+  TransitionType.VINYL_BRAKE,
+  TransitionType.CUT,
+)
 
 
 def transition_profile_label(transition_type: TransitionType) -> str:
@@ -33,6 +52,12 @@ def format_transition_arrow(transition: PlannedTransition | None) -> str:
 def summarize_session_transitions(session: MixSession) -> str:
   if not session.transitions:
     return "Переходы: нет данных — нажмите «Построить микс» заново"
+
+  normalized_types = {transition.type.normalized() for transition in session.transitions}
+  if len(normalized_types) == 1:
+    only = transition_profile_label(session.transitions[0].type)
+    count = len(session.transitions)
+    return f"Переходы ({only}): ×{count}"
 
   counts: Counter[str] = Counter()
   for transition in session.transitions:

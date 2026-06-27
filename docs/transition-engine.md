@@ -176,14 +176,13 @@ GUI: только за флагом «Дополнительно» или отд
 | `echo_out` | Echo Out | Растворение хвоста; сложные смены |
 | `filter_sweep` | Filter Sweep | LP/HP перед вводом следующего трека |
 | `bass_swap` | Bass Swap | При близком BPM, смена басовой линии |
-| `reverse_reverb` | Reverse Reverb | Перед новым вступлением |
-| `vinyl_brake` | Vinyl Brake | Редкий художественный эффект |
-| `tape_stop` | Tape Stop | Резкая остановка предыдущего |
-| `impact` | Impact Transition | Перед энергичным вступлением |
+| `reverse_swell` | Reverse Swell | Упрощённый reverse-reverb на голове входящего (`reverse_reverb` в плане) |
+| `tape_stop` | Tape Stop | Замедление хвоста в overlap (не мгновенный cut) |
+| `impact` | Impact Transition | Перед энергичным / более громким вступлением |
 
-MVP реализации: начать с **2–3** профилей (smooth_blend + filter_sweep + echo_out), остальные — итеративно.
+**Реализовано (v1.3):** все профили выше + `cut` только в CLI fixed/random.
 
-Правила «когда применять» — живая таблица; стартовые эвристики по Δ BPM, energy, groove (см. обсуждение v1.3).
+Правила «когда применять» — в `engine/transitions/profiles.py`; стартовые эвристики по Δ BPM, energy, groove.
 
 ### Cooldown
 
