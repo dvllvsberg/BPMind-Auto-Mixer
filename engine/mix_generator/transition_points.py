@@ -36,6 +36,11 @@ def _default_play_until(
   return max(start, min(target, end - crossfade_duration))
 
 
+def planning_crossfade_sec(global_crossfade_sec: float) -> float:
+  """Запас для resolve_play_until до планирования переходов (auto-duration)."""
+  return max(global_crossfade_sec, 10.0)
+
+
 def resolve_play_until(
   track: Track,
   crossfade_duration: float,

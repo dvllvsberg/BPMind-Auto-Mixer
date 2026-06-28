@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 from engine.domain.enums import TransitionType
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
-from engine.transitions.context import build_transition_context
+from engine.transitions.context import TransitionContext, build_transition_context
 from engine.transitions.cooldown import CooldownTracker
+from engine.transitions.duration import compute_transition_duration_sec
 from engine.transitions.modes import TransitionMode
 from engine.transitions.profiles import PROFILES_DEBUG, PROFILES_AUTO, decide_profile, get_profile
 
@@ -16,6 +17,7 @@ class TransitionPlanConfig:
   mode: TransitionMode = TransitionMode.AUTO
   fixed_profile: TransitionType = TransitionType.SMOOTH_BLEND
   crossfade_duration_sec: float = 8.0
+  auto_duration: bool = True
   seed: int | None = None
 
 
@@ -25,10 +27,24 @@ def _effective_until(item: MixSessionTrack, track: Track) -> float:
   return track.duration or item.play_from_sec
 
 
-def _duration_for_profile(profile: TransitionType, config: TransitionPlanConfig) -> float:
-  if profile.normalized() is TransitionType.CUT:
-    return 0.0
-  return config.crossfade_duration_sec
+def _duration_for_transition(
+  profile: TransitionType,
+  ctx: TransitionContext,
+  item_a: MixSessionTrack,
+  track_a: Track,
+  *,
+  play_until_sec: float,
+  config: TransitionPlanConfig,
+) -> float:
+  return compute_transition_duration_sec(
+    profile,
+    ctx,
+    outgoing_item=item_a,
+    outgoing_track=track_a,
+    play_until_sec=play_until_sec,
+    global_cap_sec=config.crossfade_duration_sec,
+    auto_duration=config.auto_duration,
+  )
 
 
 class TransitionPlanner:
@@ -63,7 +79,21 @@ class TransitionPlanner:
         total_steps=len(session.tracks) - 1,
       )
       start_at = _effective_until(item_a, track_a)
-      duration = _duration_for_profile(profile, config)
+      ctx = build_transition_context(
+        track_a,
+        track_b,
+        recent_profiles=cooldown.recent(),
+        step_index=index,
+        total_steps=len(session.tracks) - 1,
+      )
+      duration = _duration_for_transition(
+        profile,
+        ctx,
+        item_a,
+        track_a,
+        play_until_sec=start_at,
+        config=config,
+      )
 
       transitions.append(
         PlannedTransition(

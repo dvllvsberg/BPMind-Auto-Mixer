@@ -71,3 +71,48 @@ def blend_tape_track_seam(outgoing_tail: np.ndarray, incoming: np.ndarray) -> np
     outgoing_tail[-overlap:] * fade_out + incoming[:overlap] * fade_in
   ).astype(np.float32, copy=False)
   return soften_tape_boundary_dip(incoming, overlap // 2, sr=TAPE_HANDOFF_SR)
+
+
+REVERSE_HANDOFF_WINDOW_SEC = 0.12
+
+
+def blend_reverse_track_seam(overlap_tail: np.ndarray, incoming: np.ndarray) -> np.ndarray:
+  """Сшивка overlap reverse → main body B без микро-обрыва на стыке чанков."""
+  incoming = _ensure_2d(incoming).astype(np.float32, copy=True)
+  overlap_tail = _ensure_2d(overlap_tail)
+  if incoming.size == 0 or overlap_tail.size == 0:
+    return incoming
+
+  weld = int(round(REVERSE_HANDOFF_WINDOW_SEC * TAPE_HANDOFF_SR))
+  weld = min(weld, len(incoming), len(overlap_tail))
+  if weld < 32:
+    return incoming
+
+  fade_out = np.linspace(1.0, 0.0, weld, dtype=np.float32).reshape(-1, 1)
+  fade_in = np.linspace(0.0, 1.0, weld, dtype=np.float32).reshape(-1, 1)
+  incoming[:weld] = (
+    overlap_tail[-weld:] * fade_out + incoming[:weld] * fade_in
+  ).astype(np.float32, copy=False)
+  return soften_tape_boundary_dip(incoming, weld // 2, sr=TAPE_HANDOFF_SR)
+
+
+def weld_reverse_export_boundary(
+  audio: np.ndarray,
+  boundary: int,
+  *,
+  sr: int = TAPE_HANDOFF_SR,
+) -> np.ndarray:
+  """Подтянуть тихий хвост overlap к началу main body B (без удвоения длины)."""
+  audio = _ensure_2d(audio).astype(np.float32, copy=True)
+  weld = int(round(REVERSE_HANDOFF_WINDOW_SEC * sr))
+  weld = min(weld, boundary, len(audio) - boundary)
+  if weld < 32:
+    return audio
+
+  tail_end = audio[boundary - weld : boundary]
+  head_start = audio[boundary : boundary + weld]
+  fade_out = np.linspace(1.0, 0.0, weld, dtype=np.float32).reshape(-1, 1)
+  fade_in = np.linspace(0.0, 1.0, weld, dtype=np.float32).reshape(-1, 1)
+  cross = (tail_end * fade_out + head_start * fade_in).astype(np.float32, copy=False)
+  audio[boundary : boundary + weld] = cross
+  return soften_tape_boundary_dip(audio, boundary, sr=sr)

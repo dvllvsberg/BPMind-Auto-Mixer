@@ -9,6 +9,11 @@ def transition_is_solo_tail(transition_type: TransitionType) -> bool:
   return transition_type.normalized() is TransitionType.TAPE_STOP
 
 
+def transition_is_reverse_overlay(transition_type: TransitionType) -> bool:
+  """Reverse — эффект-слой на стыке; main body входящего без skip overlap."""
+  return transition_type.normalized() is TransitionType.REVERSE_SWELL
+
+
 # Разгон на входящем — минимум в 2 раза короче торможения на уходящем.
 INCOMING_TAPE_SPIN_FACTOR = 0.5
 
@@ -50,6 +55,12 @@ def incoming_tape_spin_sec(
   return outgoing_tape_brake_sec(prev_transition) * INCOMING_TAPE_SPIN_FACTOR
 
 
+def incoming_reverse_skip_sec(prev_transition: PlannedTransition) -> float:
+  from engine.transitions.reverse_swell import reverse_incoming_skip_sec
+
+  return reverse_incoming_skip_sec(crossfade_duration_sec=prev_transition.crossfade_duration_sec)
+
+
 def incoming_play_start_sec(
   play_from_sec: float,
   prev_transition: PlannedTransition | None,
@@ -63,4 +74,6 @@ def incoming_play_start_sec(
     return play_from_sec
   if transition_is_solo_tail(prev_transition.type):
     return play_from_sec
+  if transition_is_reverse_overlay(prev_transition.type):
+    return play_from_sec + incoming_reverse_skip_sec(prev_transition)
   return play_from_sec + prev_transition.crossfade_duration_sec

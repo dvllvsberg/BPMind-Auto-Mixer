@@ -2,29 +2,64 @@ from __future__ import annotations
 
 import numpy as np
 
-from engine.transitions.crossfade import crossfade_segments
-from engine.transitions.dsp_utils import apply_echo_tail
+from engine.transitions.dsp_utils import reverse_swell_at_junction
+from engine.transitions.overlap_utils import align_overlap, sec_to_frames
+
+REVERSE_SWELL_SEC = 1.8
+
+
+def reverse_incoming_skip_sec(*, crossfade_duration_sec: float) -> float:
+  return min(REVERSE_SWELL_SEC, crossfade_duration_sec)
 
 
 def reverse_swell_mix(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
-  """Упрощённый reverse-reverb: короткий реверс головы входящего + crossfade."""
+  """
+  Reverse overlay с непрерывной энергией: reverse в первой половине swell,
+  forward B нарастает во второй; overlap[-1] = head[swell_len-1].
+  """
   if outgoing.size == 0:
     return incoming.astype(np.float32, copy=False)
   if incoming.size == 0:
     return outgoing.astype(np.float32, copy=False)
 
-  if incoming.ndim == 1:
-    incoming = incoming.reshape(-1, 1)
+  tail, head, overlap = align_overlap(outgoing, incoming)
+  if overlap == 0:
+    return np.zeros((0, tail.shape[1]), dtype=np.float32)
 
-  head_len = max(min(len(incoming) // 4, len(incoming)), 1)
-  if head_len < 16:
-    return crossfade_segments(outgoing, incoming, incoming_delay=0.45)
+  swell_len = min(sec_to_frames(REVERSE_SWELL_SEC), overlap)
+  swell_start = max(0, overlap - swell_len)
 
-  head = incoming[:head_len]
-  reversed_head = head[::-1].copy()
-  swell = apply_echo_tail(reversed_head, delay_fraction=0.14, feedback=0.52)
-  fade = np.linspace(0.75, 0.0, len(swell), dtype=np.float32).reshape(-1, 1)
+  mixed = tail.astype(np.float32, copy=True)
+  if swell_len <= 0:
+    return mixed
 
-  enriched = incoming.astype(np.float32, copy=True)
-  enriched[: len(swell)] += swell * fade * 0.72
-  return crossfade_segments(outgoing, enriched, incoming_delay=0.45)
+  swell = reverse_swell_at_junction(head, swell_sec=REVERSE_SWELL_SEC)
+  t = np.linspace(0.0, 1.0, swell_len, dtype=np.float32)
+
+  # A: полный до ~12% swell, затем cosine fade.
+  a_gain = np.where(
+    t < 0.12,
+    1.0,
+    0.5 * (1.0 + np.cos(np.pi * np.clip((t - 0.12) / 0.88, 0.0, 1.0))),
+  )
+  # Reverse: колокол в первых ~72% swell.
+  rev_t = np.clip(t / 0.72, 0.0, 1.0)
+  rev_sin = np.clip(np.sin(np.pi * rev_t), 0.0, 1.0) ** 0.9
+  rev_tail = np.clip((0.78 - t) / 0.28, 0.0, 1.0) ** 0.65
+  rev_gain = rev_sin * rev_tail
+  # Forward B: с ~38% swell до конца (комплементарно reverse, без «дыр»).
+  fwd_t = np.clip((t - 0.38) / 0.62, 0.0, 1.0)
+  fwd_gain = 0.5 * (1.0 - np.cos(np.pi * fwd_t))
+
+  a_col = a_gain.reshape(-1, 1)
+  rev_col = rev_gain.reshape(-1, 1)
+  fwd_col = fwd_gain.reshape(-1, 1)
+
+  zone = (
+    tail[swell_start:] * a_col
+    + swell[:swell_len] * rev_col * 1.05
+    + head[:swell_len] * fwd_col
+  ).astype(np.float32, copy=False)
+  mixed[swell_start:] = zone
+  mixed[-1] = head[swell_len - 1]
+  return mixed

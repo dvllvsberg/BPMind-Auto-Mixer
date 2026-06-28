@@ -282,7 +282,11 @@ class MainWindow(QWidget):
     settings_row.addWidget(QLabel("Длина сета:"))
     settings_row.addWidget(self._length_spin)
     settings_row.addSpacing(12)
-    settings_row.addWidget(QLabel("Кроссфейд:"))
+    settings_row.addWidget(QLabel("Макс. переход:"))
+    self._crossfade_spin.setToolTip(
+      "Верхняя граница длины каждого перехода. Реальная длина зависит от типа эффекта и BPM. "
+      "После изменения пересоберите микс."
+    )
     settings_row.addWidget(self._crossfade_spin)
     settings_row.addStretch()
 

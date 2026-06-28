@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from engine.domain.enums import StartMode
 from engine.domain.models import MixSession, MixSessionTrack, Track
 from engine.mix_generator.scoring import _track_energy, score_candidate
-from engine.mix_generator.transition_points import resolve_play_until
+from engine.mix_generator.transition_points import planning_crossfade_sec, resolve_play_until
 from engine.mix_generator.wave_energy import scoring_energy_weight, wave_target_energy
 
 
@@ -154,7 +154,7 @@ class MixGenerator:
       content_start, _ = _content_bounds(track)
       play_until = _default_play_until(
         track,
-        self._config.crossfade_duration_sec,
+        planning_crossfade_sec(self._config.crossfade_duration_sec),
         play_ratio=self._config.track_play_ratio,
       )
       session_tracks.append(

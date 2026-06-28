@@ -54,7 +54,7 @@ def split_bass_treble(audio: np.ndarray, *, bass_alpha: float = 0.06) -> tuple[n
 def bass_swap_outgoing(audio: np.ndarray) -> np.ndarray:
   """Снимаем бас с уходящего; к концу overlap только верх остаётся в миксе."""
   audio = _ensure_2d(audio)
-  bass, treble = split_bass_treble(audio)
+  bass, treble = split_bass_treble(audio, bass_alpha=0.09)
   bass_fade = np.linspace(1.0, 0.0, len(audio), dtype=np.float32) ** 1.1
   return (treble + bass * bass_fade.reshape(-1, 1)).astype(np.float32, copy=False)
 
@@ -62,9 +62,160 @@ def bass_swap_outgoing(audio: np.ndarray) -> np.ndarray:
 def bass_swap_incoming(audio: np.ndarray) -> np.ndarray:
   """Бас входящего нарастает к концу overlap — последний сэмпл = исходный (стык с main body)."""
   audio = _ensure_2d(audio)
-  bass, treble = split_bass_treble(audio)
+  bass, treble = split_bass_treble(audio, bass_alpha=0.09)
   bass_rise = np.linspace(0.0, 1.0, len(audio), dtype=np.float32) ** 1.2
   return (treble + bass * bass_rise.reshape(-1, 1)).astype(np.float32, copy=False)
+
+
+def bass_swap_outgoing_staged(audio: np.ndarray) -> np.ndarray:
+  """Бас уходит быстрее; верх держится дольше для staged overlap."""
+  audio = _ensure_2d(audio)
+  bass, treble = split_bass_treble(audio, bass_alpha=0.1)
+  progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float32)
+  bass_fade = np.power(1.0 - progress, 1.05)
+  treble_fade = np.power(1.0 - progress, 0.42)
+  return (treble * treble_fade.reshape(-1, 1) + bass * bass_fade.reshape(-1, 1)).astype(
+    np.float32, copy=False
+  )
+
+
+def bass_swap_incoming_staged(audio: np.ndarray) -> np.ndarray:
+  audio = _ensure_2d(audio)
+  bass, treble = split_bass_treble(audio, bass_alpha=0.1)
+  progress = np.linspace(0.0, 1.0, len(audio), dtype=np.float32)
+  bass_rise = np.power(progress, 0.78)
+  treble_rise = np.power(progress, 0.38)
+  return (treble * treble_rise.reshape(-1, 1) + bass * bass_rise.reshape(-1, 1)).astype(
+    np.float32, copy=False
+  )
+
+
+def _delay_buffer(audio: np.ndarray, delay: int) -> np.ndarray:
+  audio = _ensure_2d(audio)
+  if delay <= 0:
+    return np.zeros_like(audio)
+  out = np.zeros_like(audio)
+  out[delay:] = audio[:-delay]
+  return out
+
+
+def _simple_reverb_wet(audio: np.ndarray, *, mix: float = 1.0) -> np.ndarray:
+  """Мягкий reverb-хвост (меньше «гребёнки» от параллельных comb)."""
+  audio = _ensure_2d(audio)
+  length = len(audio)
+  if length < 8:
+    return np.zeros_like(audio)
+
+  sr = 44100
+  delay_ms = (37, 59, 89, 127)
+  feedback = 0.48
+  wet = np.zeros_like(audio)
+  for ms in delay_ms:
+    delay = max(int(sr * ms / 1000.0), 1)
+    if delay >= length:
+      continue
+    tap = _delay_buffer(audio, delay)
+    damped = one_pole_lowpass(tap, 0.28)
+    wet += damped * (0.28 / len(delay_ms))
+
+  for ms in (71, 103):
+    delay = max(int(sr * ms / 1000.0), 1)
+    if delay < length:
+      wet[delay:] += wet[:-delay] * (feedback * 0.32)
+
+  wet = one_pole_lowpass(wet, 0.22)
+  return (wet * mix).astype(np.float32, copy=False)
+
+
+def _reverb_wet_with_muffle(wet: np.ndarray) -> np.ndarray:
+  """Нарастающая «размазанность» — reverb темнеет к концу overlap."""
+  wet = _ensure_2d(wet)
+  length = len(wet)
+  if length < 4:
+    return wet
+
+  dark = progressive_lowpass(wet, end_alpha=0.04)
+  progress = np.linspace(0.0, 1.0, length, dtype=np.float32).reshape(-1, 1)
+  smear = np.power(progress, 0.82)
+  return (wet * (1.0 - smear * 0.82) + dark * smear).astype(np.float32, copy=False)
+
+
+def reverb_out_outgoing(audio: np.ndarray) -> np.ndarray:
+  """Dry уходит, reverb tail нарастает и к концу уходит «под воду»."""
+  audio = _ensure_2d(audio)
+  length = len(audio)
+  if length < 8:
+    return audio.astype(np.float32, copy=False)
+
+  progress = np.linspace(0.0, 1.0, length, dtype=np.float32).reshape(-1, 1)
+  dry_env = np.power(1.0 - progress, 0.52)
+  wet_env = np.power(progress, 0.68) * 1.25
+  wet = _simple_reverb_wet(audio, mix=1.0)
+  wet = _reverb_wet_with_muffle(wet)
+  return (audio * dry_env + wet * wet_env).astype(np.float32, copy=False)
+
+
+def reverb_out_incoming(audio: np.ndarray) -> np.ndarray:
+  """Dry входящего; к концу overlap — исходный сигнал для стыка с main body."""
+  audio = _ensure_2d(audio)
+  length = len(audio)
+  if length == 0:
+    return audio
+  progress = np.linspace(0.0, 1.0, length, dtype=np.float32).reshape(-1, 1)
+  gain = 0.12 + 0.88 * np.power(progress, 0.5)
+  return (audio * gain).astype(np.float32, copy=False)
+
+
+def reverse_swell_at_junction(
+  head: np.ndarray,
+  *,
+  swell_sec: float,
+  sr: int = 44100,
+) -> np.ndarray:
+  """Reversed фрагмент головы incoming — стыкуется с началом track B."""
+  head = _ensure_2d(head)
+  swell_len = min(max(int(swell_sec * sr), 32), len(head))
+  if swell_len < 8:
+    return np.zeros((0, head.shape[1]), dtype=np.float32)
+
+  clip = head[:swell_len]
+  reversed_clip = clip[::-1].copy()
+  wet = _simple_reverb_wet(reversed_clip, mix=0.75)
+  return (reversed_clip * 0.78 + wet * 0.55).astype(np.float32, copy=False)
+
+
+def impact_punch_head(audio: np.ndarray, *, sr: int = 44100) -> np.ndarray:
+  """Входящий с transient punch (низкий thump + яркий атака)."""
+  audio = _ensure_2d(audio)
+  length = len(audio)
+  if length == 0:
+    return audio
+
+  progress = np.linspace(0.0, 1.0, length, dtype=np.float32)
+  in_rise = np.clip(progress * 2.2, 0.0, 1.0) ** 0.7
+  punch = np.exp(-((progress - 0.1) / 0.055) ** 2) * 1.35
+  env = in_rise * (1.0 + punch)
+  env = env / max(float(env[-1]), 1e-6)
+
+  out = audio * env.reshape(-1, 1)
+
+  thump_len = min(int(0.14 * sr), length)
+  if thump_len > 8:
+    t = np.arange(thump_len, dtype=np.float32) / sr
+    thump = np.sin(2.0 * np.pi * 72.0 * t) * np.exp(-t * 24.0) * 0.42
+    thump += np.sin(2.0 * np.pi * 140.0 * t) * np.exp(-t * 38.0) * 0.12
+    thump = thump.reshape(-1, 1)
+    out[:thump_len] += thump
+
+  click_len = min(int(0.018 * sr), length)
+  if click_len > 4:
+    t_click = np.arange(click_len, dtype=np.float32) / sr
+    click = np.sin(2.0 * np.pi * 1800.0 * t_click) * np.exp(-t_click * 160.0) * 0.09
+    out[:click_len, :] += click.reshape(-1, 1)
+
+  out = np.tanh(out * 1.22).astype(np.float32, copy=False)
+  out[-1] = audio[-1]
+  return out
 
 
 def progressive_wet_effect(

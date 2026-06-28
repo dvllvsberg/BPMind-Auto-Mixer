@@ -9,7 +9,7 @@ _PROFILE_LABELS: dict[TransitionType, str] = {
   TransitionType.SMOOTH_BLEND: "плавный",
   TransitionType.CUT: "резкий",
   TransitionType.FILTER_SWEEP: "фильтр (LP)",
-  TransitionType.ECHO_OUT: "эхо",
+  TransitionType.ECHO_OUT: "reverb",
   TransitionType.BASS_SWAP: "бас-своп",
   TransitionType.TAPE_STOP: "стоп ленты",
   TransitionType.VINYL_BRAKE: "винил",

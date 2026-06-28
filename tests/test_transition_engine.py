@@ -121,6 +121,81 @@ def test_new_profiles_preserve_overlap_length():
     assert mixed.shape == (200, 1), profile.value
 
 
+def test_profiles_differ_from_smooth_blend():
+  length = 8000
+  t = np.linspace(0.0, 1.0, length, dtype=np.float32)
+  outgoing = np.stack([np.sin(t * 48 * np.pi), np.sin(t * 48 * np.pi)], axis=1)
+  incoming = np.stack([np.sin(t * 40 * np.pi), np.sin(t * 40 * np.pi)], axis=1)
+  smooth = mix_transition_segments(TransitionType.SMOOTH_BLEND, outgoing, incoming)
+  for profile in (
+    TransitionType.FILTER_SWEEP,
+    TransitionType.ECHO_OUT,
+    TransitionType.BASS_SWAP,
+    TransitionType.IMPACT,
+    TransitionType.REVERSE_SWELL,
+  ):
+    mixed = mix_transition_segments(profile, outgoing, incoming)
+    assert mixed.shape == smooth.shape
+    assert float(np.mean(np.abs(smooth - mixed))) > 0.008, profile.value
+
+
+def test_reverse_swell_placed_at_junction_not_early():
+  length = 44100 * 6
+  rng = np.random.default_rng(11)
+  outgoing = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
+  incoming = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
+  mixed = mix_transition_segments(TransitionType.REVERSE_SWELL, outgoing, incoming)
+  smooth = mix_transition_segments(TransitionType.SMOOTH_BLEND, outgoing, incoming)
+  diff = np.abs(mixed - smooth)
+
+  swell_len = min(int(1.8 * 44100), len(mixed))
+  swell_start = len(mixed) - swell_len
+  tail_diff = float(np.mean(diff[swell_start:]))
+  head_diff = float(np.mean(diff[:swell_len]))
+
+  assert tail_diff > head_diff * 1.15
+  swell_len = min(int(1.8 * 44100), len(mixed))
+  assert np.allclose(mixed[-1], incoming[swell_len - 1], atol=1e-5)
+
+
+def test_reverse_swell_ends_at_incoming_start_for_main_body():
+  length = 44100 * 4
+  rng = np.random.default_rng(12)
+  outgoing = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
+  incoming = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
+  mixed = mix_transition_segments(TransitionType.REVERSE_SWELL, outgoing, incoming)
+
+  swell_len = min(int(1.8 * 44100), len(mixed))
+  assert np.allclose(mixed[-1], incoming[swell_len - 1], atol=1e-5)
+
+
+def test_reverse_swell_hold_tail_matches_incoming_level():
+  length = 44100 * 4
+  rng = np.random.default_rng(14)
+  outgoing = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
+  incoming = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
+  mixed = mix_transition_segments(TransitionType.REVERSE_SWELL, outgoing, incoming)
+
+  swell_len = min(int(1.8 * 44100), len(mixed))
+  hold = min(int(0.15 * 44100), swell_len)
+  tail_rms = float(np.sqrt(np.mean(mixed[-hold:] ** 2)))
+  ref_rms = float(np.sqrt(np.mean(incoming[swell_len - hold : swell_len] ** 2)))
+  assert tail_rms >= ref_rms * 0.85
+
+
+def test_reverse_swell_incoming_starts_after_swell_head():
+  from engine.transitions.playback_rules import incoming_play_start_sec
+
+  transition = PlannedTransition(
+    from_track_id=1,
+    to_track_id=2,
+    type=TransitionType.REVERSE_SWELL,
+    start_at_sec=90.0,
+    crossfade_duration_sec=8.0,
+  )
+  assert incoming_play_start_sec(5.0, transition, enable_crossfade=True, incoming_track_id=2) == pytest.approx(6.8, abs=0.01)
+
+
 def test_echo_out_end_matches_incoming_for_seamless_main_body():
   incoming = np.random.default_rng(6).standard_normal((700, 2)).astype(np.float32)
   outgoing = np.random.default_rng(7).standard_normal((700, 2)).astype(np.float32)
