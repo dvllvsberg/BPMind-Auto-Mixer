@@ -2,23 +2,26 @@
 
 ## [Unreleased]
 
-### Исправлено
+## [1.4.0] — 2026-06-28
 
-- **filter_sweep, impact, reverse_swell, bass_swap** — staged overlap (как vinyl): эффект слышен на solo-части, входящий в конце
-- **echo_out** → **reverb-out**: алгоритмический reverb на хвосте вместо hallway; подпись в GUI «reverb»
-- Подкрутка длительностей и громкости filter / reverb / impact / reverse / bass_swap (v1.4.1)
-- **reverb** — мягче comb, нарастающий LP-muffle к концу хвоста
-- **reverse** — фрагмент на стыке (конец overlap), cosine fade у track A, без паузы перед track B
-- **reverse** — main body track B с `play_from` (без skip overlap); overlay-эффект как в NLE
-- **reverse** — короче overlap (~2.5 такта), сшивка чанков при export/playback
-- **reverse** — hold-хвост (~70 мс) forward B на полной громкости перед main body
-- **reverse** — непрерывный forward B: overlap → `head[swell-1]`, main body с `head[swell]`
-- **reverse** — эффект-слой отдельно от forward B (без наложения друг на друга)
-- **reverse** — убрана «сшивка» на стыке чанков (ломала уже ровный переход)
+TEA v1.4: авто-длительность переходов по профилю и BPM; staged overlap и reverb-out для профилей v1.3.
 
 ### Добавлено
 
 - **Auto-duration (TEA v1.4)** — планировщик вычисляет `crossfade_duration_sec` для каждого перехода по профилю, BPM (такты), контексту пары и доступному хвосту трека; глобальный crossfade в настройках — верхняя граница
+
+### Исправлено
+
+- **filter_sweep, impact, reverse_swell, bass_swap** — staged overlap (как vinyl): эффект слышен на solo-части, входящий в конце
+- **echo_out** → **reverb-out**: алгоритмический reverb на хвосте вместо hallway; подпись в GUI «reverb»
+- Подкрутка длительностей и громкости filter / reverb / impact / reverse / bass_swap
+- **reverb** — мягче comb, нарастающий LP-muffle к концу хвоста
+- **reverse** — overlay на стыке, непрерывный forward B, отдельный эффект-слой; без паузы перед track B
+
+### GUI
+
+- Настройка «Кроссфейд» переименована в **«Макс. переход»** (верхняя граница auto-duration)
+
 ## [1.3.0] — 2026-06-25
 
 TEA v1.3: шесть новых профилей переходов, continuous handoff в плеере, единый DSP для экспорта.
