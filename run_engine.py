@@ -493,13 +493,13 @@ def main() -> int:
   mix_parser.add_argument(
     "--transition-mode",
     default="auto",
-    choices=["auto", "fixed", "random"],
+    choices=["auto", "fixed", "random", "none"],
     help="Режим выбора переходов (по умолчанию: auto)",
   )
   mix_parser.add_argument(
     "--transition",
     help="Профиль для fixed: smooth_blend, filter_sweep, echo_out, bass_swap, impact, "
-    "tape_stop, vinyl_brake, reverse_swell, cut",
+    "tape_stop, vinyl_brake, reverse_swell",
   )
   mix_parser.add_argument(
     "--transition-seed",

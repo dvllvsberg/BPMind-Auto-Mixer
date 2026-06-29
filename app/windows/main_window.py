@@ -320,10 +320,12 @@ class MainWindow(QWidget):
     self._transition_mode_combo.addItem("Авто (DJ)", TransitionMode.AUTO.value)
     self._transition_mode_combo.addItem("Фиксированный (тест)", TransitionMode.FIXED.value)
     self._transition_mode_combo.addItem("Случайный", TransitionMode.RANDOM.value)
+    self._transition_mode_combo.addItem("Нет", TransitionMode.NONE.value)
     self._transition_mode_combo.setToolTip(
       "Авто — умный выбор переходов.\n"
       "Фиксированный — один профиль на все стыковки (удобно слушать tape, удар, реверс).\n"
-      "Случайный — случайный профиль на каждый переход."
+      "Случайный — случайный профиль на каждый переход.\n"
+      "Нет — без эффектов, треки целиком."
     )
     self._transition_mode_combo.currentIndexChanged.connect(self._on_transition_mode_changed)
     self._transition_mode_combo.currentIndexChanged.connect(self._save_transition_settings)
@@ -338,10 +340,15 @@ class MainWindow(QWidget):
     self._transition_profile_combo.currentIndexChanged.connect(self._save_transition_settings)
 
     saved_transition_mode = settings.get("transition_mode", TransitionMode.AUTO.value)
+    saved_profile = settings.get("transition_profile", TransitionType.TAPE_STOP.value)
+    if saved_profile in ("none", "cut") and saved_transition_mode == TransitionMode.FIXED.value:
+      saved_transition_mode = TransitionMode.NONE.value
     mode_index = self._transition_mode_combo.findData(saved_transition_mode)
     if mode_index >= 0:
       self._transition_mode_combo.setCurrentIndex(mode_index)
     saved_profile = settings.get("transition_profile", TransitionType.TAPE_STOP.value)
+    if saved_profile == "cut":
+      saved_profile = TransitionType.TAPE_STOP.value
     profile_index = self._transition_profile_combo.findData(saved_profile)
     if profile_index >= 0:
       self._transition_profile_combo.setCurrentIndex(profile_index)
@@ -563,6 +570,7 @@ class MainWindow(QWidget):
     mode_value = self._transition_mode_combo.currentData()
     fixed = mode_value == TransitionMode.FIXED.value
     self._transition_profile_combo.setEnabled(fixed)
+    self._transition_profile_combo.setVisible(fixed)
 
   def _save_transition_settings(self, *_args) -> None:
     settings = load_settings()

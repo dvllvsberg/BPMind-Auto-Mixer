@@ -119,6 +119,9 @@ class TransitionPlanner:
     step_index: int = 0,
     total_steps: int = 1,
   ) -> TransitionType:
+    if config.mode is TransitionMode.NONE:
+      return TransitionType.NONE
+
     if config.mode is TransitionMode.FIXED:
       return config.fixed_profile.normalized()
 

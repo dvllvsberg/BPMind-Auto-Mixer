@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-06-28
+
+TEA v1.5: единый junction API и multi-lane рендер; фикс reverse swell; режим «Нет» без переходов.
+
+### Добавлено
+
+- **Junction API** (`junction.py`) — единая точка рендера стыка для всех профилей; реестр `render_*_junction`
+- **Multi-lane рендер** (`lanes.py`) — дорожки с огибающими, staged blend через `mix_lanes`; отладочный экспорт WAV по слоям (`write_junction_debug_wavs`)
+- **Impact v2** — киношный стык: pitch-down outgoing, snap incoming, отдельная FX-дорожка (swoosh + punch)
+- **Режим «Нет»** (`TransitionMode.NONE`) — сет без overlap и DSP; треки играют целиком (игнор play_ratio)
+- **Opening envelope** (`segment_envelope.py`) — мягкий fade-in/fade-out на main body первого трека (live + export)
+- CLI `--transition-mode none`
+- 135 автотестов
+
+### Исправлено
+
+- **reverse_swell** — обрезка тихого префикса головы входящего; forward handoff с слышимой точки; без микропаузы (~30 ms) на стыке overlap → main
+- **Таймлайн / экспорт** — `reserve_fade_sec` vs `overlap_output_sec` для reverse: длина рендера совпадает с планом сета
+- **playback_rules** — `planned_incoming_main_skip` синхронизирован с junction-рендером (reverse, tape, none)
+- Профили filter / echo / bass / vinyl переведены на junction + lanes API
+- Legacy `cut` → `none` при загрузке рецептов и в `TransitionType.parse`
+
+### GUI
+
+- **Переходы: «Нет»** — в комбобоксе режима (не в списке профилей); комбобокс профиля скрыт вне режима «Фиксированный»
+- Убран «резкий» (`cut`) из профилей отладки
+
+### CLI
+
+```powershell
+python run_engine.py mix --transition-mode none
+```
+
 ## [1.4.0] — 2026-06-28
 
 TEA v1.4: авто-длительность переходов по профилю и BPM; staged overlap и reverb-out для профилей v1.3.

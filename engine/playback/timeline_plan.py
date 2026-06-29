@@ -6,12 +6,18 @@ from enum import Enum
 from engine.analysis.intro_entry import intro_skip_sec as detect_intro_skip_sec
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
 from engine.transitions.playback_rules import (
-  incoming_play_start_sec,
+  incoming_play_start_frame,
   incoming_tape_spin_sec,
   outgoing_tape_brake_sec,
   outgoing_tape_silence_sec,
   outgoing_tape_tail_sec,
+  transition_is_reverse_overlay,
   transition_is_solo_tail,
+)
+from engine.transitions.reverse_swell_motor import (
+  reverse_effective_overlap_frames,
+  reverse_overlap_output_frames,
+  reverse_playback_skip_frames,
 )
 
 
@@ -110,16 +116,40 @@ def build_track_output_plan(
   if track is None:
     return None
 
-  start_sec = item.play_from_sec
+  start_frame = int(item.play_from_sec * 44100)
   if index > 0 and enable_crossfade:
     prev_item = session.tracks[index - 1]
     prev_transition = transitions_by_from.get(prev_item.track_id)
-    start_sec = incoming_play_start_sec(
-      item.play_from_sec,
-      prev_transition,
-      enable_crossfade=True,
-      incoming_track_id=item.track_id,
-    )
+    if (
+      prev_transition is not None
+      and transition_is_reverse_overlay(prev_transition.type)
+      and prev_transition.to_track_id == item.track_id
+    ):
+      prev_track = tracks_by_id.get(prev_item.track_id)
+      prev_until = _effective_until(prev_item, prev_track) if prev_track else None
+      overlap_frames = (
+        reverse_overlap_output_frames(
+          play_from_sec=item.play_from_sec,
+          crossfade_duration_sec=prev_transition.crossfade_duration_sec,
+          outgoing_until_sec=prev_until,
+        )
+        if prev_until is not None
+        else int(prev_transition.crossfade_duration_sec * 44100)
+      )
+      start_frame = int(item.play_from_sec * 44100) + reverse_playback_skip_frames(
+        track_path=track.path,
+        play_from_sec=item.play_from_sec,
+        crossfade_duration_sec=prev_transition.crossfade_duration_sec,
+        overlap_frames=overlap_frames,
+      )
+    else:
+      start_frame = incoming_play_start_frame(
+        item.play_from_sec,
+        prev_transition,
+        enable_crossfade=True,
+        incoming_track_id=item.track_id,
+      )
+  start_sec = start_frame / 44100.0
 
   spin_sec = 0.0
   intro_skip = 0.0
@@ -137,9 +167,26 @@ def build_track_output_plan(
 
   until_sec = _effective_until(item, track)
   next_transition = transitions_by_from.get(item.track_id) if index + 1 < len(session.tracks) else None
-  fade_sec = next_transition.crossfade_duration_sec if next_transition and enable_crossfade else 0.0
+  reserve_fade_sec = next_transition.crossfade_duration_sec if next_transition and enable_crossfade else 0.0
+  overlap_output_sec = reserve_fade_sec
   if next_transition is not None and enable_crossfade and transition_is_solo_tail(next_transition.type):
-    fade_sec = outgoing_tape_tail_sec(next_transition)
+    reserve_fade_sec = outgoing_tape_tail_sec(next_transition)
+    overlap_output_sec = reserve_fade_sec
+  if (
+    next_transition is not None
+    and enable_crossfade
+    and transition_is_reverse_overlay(next_transition.type)
+    and index + 1 < len(session.tracks)
+  ):
+    next_item = session.tracks[index + 1]
+    next_track = tracks_by_id.get(next_item.track_id)
+    if next_track is not None:
+      overlap_output_sec = reverse_effective_overlap_frames(
+        play_from_sec=next_item.play_from_sec,
+        crossfade_duration_sec=reserve_fade_sec,
+        outgoing_until_sec=until_sec,
+        track_path=next_track.path,
+      ) / 44100.0
 
   brake_sec = 0.0
   silence_sec = 0.0
@@ -148,11 +195,11 @@ def build_track_output_plan(
     silence_sec = outgoing_tape_silence_sec(next_transition)
 
   main_end = until_sec
-  if fade_sec > 0:
-    main_end = max(start_sec, until_sec - fade_sec)
+  if reserve_fade_sec > 0:
+    main_end = max(start_sec, until_sec - reserve_fade_sec)
 
   main_duration = max(0.0, main_end - start_sec - intro_skip)
-  output_duration = main_duration + fade_sec
+  output_duration = main_duration + overlap_output_sec
   file_duration = track.duration or until_sec
 
   regions: list[TimelineRegion] = []
@@ -179,7 +226,7 @@ def build_track_output_plan(
       TimelineRegion(session_start, session_start + spin_duration, RegionKind.TAPE_START),
     )
 
-  if fade_sec > 0:
+  if overlap_output_sec > 0:
     tail_kind = RegionKind.TAPE_STOP
     if next_transition is not None and not transition_is_solo_tail(next_transition.type):
       tail_kind = RegionKind.CROSSFADE
@@ -224,7 +271,7 @@ def build_track_output_plan(
     session_offset_sec=session_offset_sec,
     output_duration_sec=output_duration,
     main_duration_sec=main_duration,
-    crossfade_duration_sec=fade_sec,
+    crossfade_duration_sec=overlap_output_sec,
     play_from_sec=item.play_from_sec,
     play_until_sec=until_sec,
     file_duration_sec=file_duration,

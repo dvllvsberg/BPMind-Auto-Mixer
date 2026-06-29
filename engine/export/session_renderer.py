@@ -9,13 +9,19 @@ import soundfile as sf
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
 from engine.playback.audio_loader import load_audio_segment
 from engine.playback.incoming_main import load_incoming_main_audio
+from engine.playback.segment_envelope import apply_opening_track_main_envelope
 from engine.playback.timeline_plan import build_session_timeline
 from engine.transitions.crossfade import resample_audio
 from engine.transitions.playback_rules import (
   incoming_play_start_sec,
   outgoing_tape_brake_sec,
   outgoing_tape_tail_sec,
+  transition_is_reverse_overlay,
   transition_is_solo_tail,
+)
+from engine.transitions.reverse_swell_motor import (
+  reverse_overlap_output_frames,
+  reverse_playback_skip_frames,
 )
 from engine.transitions.tape_handoff import soften_tape_boundary_dip
 from engine.transitions.render_overlap import render_transition_overlap
@@ -96,17 +102,38 @@ def _render_track_segment(
   item = session.tracks[index]
   track = tracks_by_id[item.track_id]
 
-  start_sec = item.play_from_sec
   prev_transition: PlannedTransition | None = None
   if index > 0 and enable_crossfade:
     prev_item = session.tracks[index - 1]
     prev_transition = transitions_by_from.get(prev_item.track_id)
-    start_sec = incoming_play_start_sec(
-      item.play_from_sec,
-      prev_transition,
-      enable_crossfade=True,
-      incoming_track_id=item.track_id,
-    )
+
+  load_from_sec = item.play_from_sec
+  output_skip_frames = 0
+  if index > 0 and enable_crossfade and prev_transition is not None:
+    if transition_is_reverse_overlay(prev_transition.type):
+      prev_track = tracks_by_id.get(prev_item.track_id)
+      prev_until = _effective_until(prev_item, prev_track) if prev_track else None
+      if prev_until is not None:
+        overlap_frames = reverse_overlap_output_frames(
+          play_from_sec=item.play_from_sec,
+          crossfade_duration_sec=prev_transition.crossfade_duration_sec,
+          outgoing_until_sec=prev_until,
+        )
+        output_skip_frames = reverse_playback_skip_frames(
+          track_path=track.path,
+          play_from_sec=item.play_from_sec,
+          crossfade_duration_sec=prev_transition.crossfade_duration_sec,
+          overlap_frames=overlap_frames,
+        )
+    else:
+      load_from_sec = incoming_play_start_sec(
+        item.play_from_sec,
+        prev_transition,
+        enable_crossfade=True,
+        incoming_track_id=item.track_id,
+      )
+
+  start_sec = load_from_sec
 
   until_sec = _effective_until(item, track)
   next_transition = transitions_by_from.get(item.track_id) if index + 1 < len(session.tracks) else None
@@ -116,21 +143,33 @@ def _render_track_segment(
 
   main_end = until_sec
   if until_sec is not None and fade_sec > 0:
-    main_end = max(start_sec, until_sec - fade_sec)
+    main_end = max(load_from_sec, until_sec - fade_sec)
 
   parts: list[np.ndarray] = []
 
-  if main_end is not None and main_end > start_sec:
+  if main_end is not None and main_end > load_from_sec:
     main_audio = load_incoming_main_audio(
       track.path,
-      start_sec,
+      load_from_sec,
       main_end,
       prev_transition,
       enable_crossfade=enable_crossfade,
       incoming_track_id=item.track_id,
       normalize_fn=_normalize_audio,
+      output_skip_frames=output_skip_frames,
     )
     if len(main_audio) > 0:
+      if index == 0:
+        has_next_transition = (
+          next_transition is not None
+          and enable_crossfade
+          and index + 1 < len(session.tracks)
+          and fade_sec > 0
+        )
+        main_audio = apply_opening_track_main_envelope(
+          main_audio,
+          apply_fade_out=not has_next_transition,
+        )
       parts.append(main_audio)
 
   if (
@@ -199,7 +238,9 @@ def render_session_audio(
   for index in range(1, len(chunks)):
     prev_transition = transitions_by_from.get(session.tracks[index - 1].track_id)
     boundary += len(chunks[index - 1])
-    if prev_transition is not None and transition_is_solo_tail(prev_transition.type):
+    if prev_transition is None:
+      continue
+    if transition_is_solo_tail(prev_transition.type):
       audio = soften_tape_boundary_dip(audio, boundary)
   return audio
 

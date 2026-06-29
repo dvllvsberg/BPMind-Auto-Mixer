@@ -11,6 +11,7 @@ from engine.mix_generator.recipe_metadata import MixRecipeMetadata
 from engine.mix_generator.session_store import load_mix_recipe, save_mix_recipe
 from engine.mix_pipeline import build_mix_session
 from engine.transitions.modes import TransitionMode
+from engine.transitions.planner import TransitionPlanner, TransitionPlanConfig
 
 
 def _track(
@@ -87,7 +88,57 @@ def test_mix_pipeline_assigns_transitions():
 
   assert len(session.tracks) == 3
   assert len(session.transitions) == 2
-  assert session.transitions[0].type.value in {"smooth_blend", "cut", "filter_sweep"}
+  assert session.transitions[0].type.value in {"smooth_blend", "filter_sweep", "echo_out"}
+
+
+def test_mix_pipeline_none_mode_plays_full_content():
+  from engine.domain.enums import TransitionType
+
+  tracks = [
+    _track(1, "A", bpm=68.0, duration=200.0, content_start=0.0, content_end=180.0),
+    _track(2, "B", bpm=70.0, duration=200.0, content_start=0.0, content_end=175.0),
+  ]
+  session = build_mix_session(
+    tracks,
+    StartMode.CALM,
+    MixGeneratorConfig(session_length=2, crossfade_duration_sec=8.0, track_play_ratio=0.75),
+    transition_mode=TransitionMode.NONE,
+    transition_plan_config=TransitionPlanConfig(
+      mode=TransitionMode.NONE,
+      crossfade_duration_sec=8.0,
+    ),
+  )
+
+  assert session.tracks[0].play_until_sec == pytest.approx(180.0)
+  assert session.tracks[1].play_until_sec == pytest.approx(175.0)
+  assert session.transitions[0].type is TransitionType.NONE
+  assert session.transitions[0].crossfade_duration_sec == 0.0
+
+
+def test_planner_none_mode():
+  from engine.domain.models import MixSession, MixSessionTrack
+  from engine.domain.enums import TransitionType
+
+  session = MixSession(
+    tracks=[
+      MixSessionTrack(track_id=1, play_until_sec=120.0),
+      MixSessionTrack(track_id=2, play_until_sec=120.0),
+    ],
+    transitions=[],
+    start_mode=StartMode.CALM,
+  )
+  tracks_by_id = {
+    1: _track(1, "A", bpm=120.0),
+    2: _track(2, "B", bpm=122.0),
+  }
+  plan = TransitionPlanner().plan(
+    session,
+    tracks_by_id,
+    TransitionPlanConfig(mode=TransitionMode.NONE),
+  )
+  assert len(plan) == 1
+  assert plan[0].type is TransitionType.NONE
+  assert plan[0].crossfade_duration_sec == 0.0
 
 
 def test_mix_generator_prefers_close_bpm_over_outlier():

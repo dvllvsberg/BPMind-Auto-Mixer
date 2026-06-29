@@ -63,27 +63,6 @@ def _filter_sweep_score(ctx: TransitionContext) -> float:
   return score
 
 
-def _cut_score(ctx: TransitionContext) -> float:
-  score = 12.0
-  if ctx.delta_bpm >= 12.0:
-    score += 18.0
-  if ctx.groove_score < 0.38 and ctx.has_groove_data:
-    score += 22.0
-  if (
-    ctx.has_groove_data
-    and ctx.groove_score < 0.38
-    and ctx.loudness_delta >= 3.5
-  ):
-    score += 14.0
-  if (
-    consecutive_smooth_count(ctx.recent_profiles) >= 3
-    and ctx.has_groove_data
-    and ctx.groove_score < 0.5
-  ):
-    score += 16.0
-  return score
-
-
 def _echo_out_score(ctx: TransitionContext) -> float:
   score = 14.0
   if ctx.loudness_delta >= 3.0:
@@ -235,16 +214,8 @@ PROFILES_AUTO: tuple[TransitionProfile, ...] = (
   ),
 )
 
-# cut — только CLI fixed/random; в авто не используется (топорный обрыв на 90% фрагмента)
-PROFILES_DEBUG: tuple[TransitionProfile, ...] = PROFILES_AUTO + (
-  TransitionProfile(
-    type=TransitionType.CUT,
-    priority=30,
-    cooldown_lookback=4,
-    max_uses_in_lookback=1,
-    score=_cut_score,
-  ),
-)
+# NONE — только fixed-режим в GUI; в random/auto не участвует
+PROFILES_DEBUG: tuple[TransitionProfile, ...] = PROFILES_AUTO
 
 PROFILES = PROFILES_DEBUG
 

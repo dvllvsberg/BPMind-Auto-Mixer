@@ -2,37 +2,72 @@ from __future__ import annotations
 
 import numpy as np
 
-from engine.transitions.dsp_utils import impact_punch_head
-from engine.transitions.overlap_utils import OVERLAP_SR, align_overlap, blend_sec_for_overlap, staged_tail_blend
+from engine.transitions.dsp_utils import impact_fx_gain, impact_fx_layer
+from engine.transitions.impact_motor import (
+  build_impact_crossfade_gains,
+  impact_junction_frame,
+  impact_pitch_down_outgoing,
+  impact_snap_up_incoming,
+)
+from engine.transitions.lanes import (
+  JunctionLane,
+  JunctionRender,
+  align_junction,
+  empty_junction_render,
+  mix_lanes,
+  pin_overlap_tail,
+)
+from engine.transitions.overlap_utils import OVERLAP_SR
 
-IMPACT_BLEND_MIN_SEC = 0.95
-IMPACT_BLEND_FRACTION = 0.48
+
+def render_impact_junction(
+  outgoing: np.ndarray,
+  incoming: np.ndarray,
+) -> JunctionRender:
+  """
+  Киношный impact: A нормально → короткий dip у стыка → snap B + hit.
+
+  Не tape_stop: нет длинного motor-brake на пол-перехода.
+  """
+  if outgoing.size == 0:
+    return JunctionRender(incoming.astype(np.float32, copy=False))
+  if incoming.size == 0:
+    return JunctionRender(outgoing.astype(np.float32, copy=False))
+
+  tail, head, overlap = align_junction(outgoing, incoming)
+  if overlap == 0:
+    return empty_junction_render(tail.shape[1] if tail.size else 2)
+
+  channels = tail.shape[1]
+  junction = impact_junction_frame(overlap)
+  junction_progress = junction / max(overlap - 1, 1)
+
+  pitched_out = impact_pitch_down_outgoing(tail, junction_frame=junction)
+  snapped_in = impact_snap_up_incoming(head, junction_frame=junction)
+
+  out_gain, in_gain = build_impact_crossfade_gains(overlap, junction)
+
+  fx_audio = impact_fx_layer(
+    overlap,
+    channels,
+    junction_progress=junction_progress,
+  )
+  fx_gain = impact_fx_gain(overlap, junction_progress=junction_progress)
+
+  lanes = (
+    JunctionLane(pitched_out, out_gain),
+    JunctionLane(snapped_in, in_gain),
+    JunctionLane(fx_audio, fx_gain),
+  )
+  mixed = pin_overlap_tail(mix_lanes(list(lanes)), head[-1])
+
+  return JunctionRender(
+    overlap_audio=mixed,
+    incoming_main_skip_sec=overlap / OVERLAP_SR,
+    lanes=lanes,
+    lane_labels=("outgoing", "incoming", "cinematic"),
+  )
 
 
 def impact_mix(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
-  if outgoing.size == 0:
-    return incoming.astype(np.float32, copy=False)
-  if incoming.size == 0:
-    return outgoing.astype(np.float32, copy=False)
-
-  tail, head, overlap = align_overlap(outgoing, incoming)
-  if overlap == 0:
-    return np.zeros((0, tail.shape[1]), dtype=np.float32)
-
-  progress = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
-  out_env = np.power(1.0 - progress, 2.4).reshape(-1, 1)
-  dipped = tail * out_env * 0.32
-  punched = impact_punch_head(head)
-
-  blend_sec = blend_sec_for_overlap(
-    overlap,
-    min_sec=IMPACT_BLEND_MIN_SEC,
-    overlap_fraction=IMPACT_BLEND_FRACTION,
-  )
-  return staged_tail_blend(
-    dipped,
-    punched,
-    incoming_blend_sec=blend_sec,
-    incoming_fade_power=0.55,
-    outgoing_fade_power=1.15,
-  )
+  return render_impact_junction(outgoing, incoming).as_overlap_chunk()

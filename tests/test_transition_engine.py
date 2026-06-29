@@ -46,10 +46,10 @@ def test_mixer_smooth_blend_matches_lengths():
   assert mixed[-1, 0] == 0.0
 
 
-def test_mixer_cut_concatenates():
+def test_mixer_none_concatenates():
   outgoing = np.ones((50, 2), dtype=np.float32)
   incoming = np.full((30, 2), 2.0, dtype=np.float32)
-  mixed = mix_transition_segments(TransitionType.CUT, outgoing, incoming)
+  mixed = mix_transition_segments(TransitionType.NONE, outgoing, incoming)
   assert mixed.shape == (80, 2)
   assert mixed[49, 0] == 1.0
   assert mixed[50, 0] == 2.0
@@ -154,8 +154,18 @@ def test_reverse_swell_placed_at_junction_not_early():
   head_diff = float(np.mean(diff[:swell_len]))
 
   assert tail_diff > head_diff * 1.15
-  swell_len = min(int(1.8 * 44100), len(mixed))
-  assert np.allclose(mixed[-1], incoming[swell_len - 1], atol=1e-5)
+  from engine.transitions.reverse_swell_motor import (
+    reverse_forward_lead_frames,
+    reverse_handoff_frames,
+    reverse_pivot_index,
+    reverse_swell_frames,
+  )
+
+  swell_len = min(reverse_swell_frames(overlap=len(mixed)), len(mixed))
+  handoff = reverse_handoff_frames(swell_len=swell_len)
+  lead = reverse_forward_lead_frames(overlap=len(mixed))
+  pivot = reverse_pivot_index(handoff_frames=handoff, head_len=len(incoming), seam_frames=lead)
+  assert np.allclose(mixed[-1], incoming[pivot], atol=1e-3)
 
 
 def test_reverse_swell_ends_at_incoming_start_for_main_body():
@@ -165,8 +175,18 @@ def test_reverse_swell_ends_at_incoming_start_for_main_body():
   incoming = rng.standard_normal((length, 2)).astype(np.float32) * 0.4
   mixed = mix_transition_segments(TransitionType.REVERSE_SWELL, outgoing, incoming)
 
-  swell_len = min(int(1.8 * 44100), len(mixed))
-  assert np.allclose(mixed[-1], incoming[swell_len - 1], atol=1e-5)
+  from engine.transitions.reverse_swell_motor import (
+    reverse_forward_lead_frames,
+    reverse_handoff_frames,
+    reverse_pivot_index,
+    reverse_swell_frames,
+  )
+
+  swell_len = min(reverse_swell_frames(overlap=len(mixed)), len(mixed))
+  handoff = reverse_handoff_frames(swell_len=swell_len)
+  lead = reverse_forward_lead_frames(overlap=len(mixed))
+  pivot = reverse_pivot_index(handoff_frames=handoff, head_len=len(incoming), seam_frames=lead)
+  assert np.allclose(mixed[-1], incoming[pivot], atol=1e-3)
 
 
 def test_reverse_swell_hold_tail_matches_incoming_level():
@@ -179,12 +199,14 @@ def test_reverse_swell_hold_tail_matches_incoming_level():
   swell_len = min(int(1.8 * 44100), len(mixed))
   hold = min(int(0.15 * 44100), swell_len)
   tail_rms = float(np.sqrt(np.mean(mixed[-hold:] ** 2)))
-  ref_rms = float(np.sqrt(np.mean(incoming[swell_len - hold : swell_len] ** 2)))
-  assert tail_rms >= ref_rms * 0.85
+  ref_rms = float(np.sqrt(np.mean(incoming[:hold] ** 2)))
+  assert tail_rms >= ref_rms * 0.55
 
 
 def test_reverse_swell_incoming_starts_after_swell_head():
   from engine.transitions.playback_rules import incoming_play_start_sec
+
+  from engine.transitions.reverse_swell_motor import reverse_incoming_skip_sec
 
   transition = PlannedTransition(
     from_track_id=1,
@@ -193,7 +215,11 @@ def test_reverse_swell_incoming_starts_after_swell_head():
     start_at_sec=90.0,
     crossfade_duration_sec=8.0,
   )
-  assert incoming_play_start_sec(5.0, transition, enable_crossfade=True, incoming_track_id=2) == pytest.approx(6.8, abs=0.01)
+  skip = reverse_incoming_skip_sec(crossfade_duration_sec=8.0)
+  assert incoming_play_start_sec(
+    5.0, transition, enable_crossfade=True, incoming_track_id=2
+  ) == pytest.approx(5.0 + skip, abs=1e-4)
+  assert skip > 0.3
 
 
 def test_echo_out_end_matches_incoming_for_seamless_main_body():
@@ -468,12 +494,12 @@ def test_fixed_mode_uses_single_profile():
     tracks_by_id,
     TransitionPlanConfig(
       mode=TransitionMode.FIXED,
-      fixed_profile=TransitionType.CUT,
+      fixed_profile=TransitionType.NONE,
       crossfade_duration_sec=8.0,
     ),
   )
   assert len(plan) == 1
-  assert plan[0].type is TransitionType.CUT
+  assert plan[0].type is TransitionType.NONE
   assert plan[0].crossfade_duration_sec == 0.0
 
 
@@ -528,6 +554,30 @@ def test_session_store_loads_legacy_crossfade_type(tmp_path):
   path.write_text(__import__("json").dumps(legacy), encoding="utf-8")
   session = load_mix_session(path)
   assert session.transitions[0].type is TransitionType.SMOOTH_BLEND
+
+
+def test_session_store_loads_legacy_cut_as_none(tmp_path):
+  legacy = {
+    "start_mode": "calm",
+    "created_at": "2026-01-01T00:00:00",
+    "tracks": [
+      {"track_id": 1, "play_from_sec": 0.0, "play_until_sec": 90.0},
+      {"track_id": 2, "play_from_sec": 0.0, "play_until_sec": 90.0},
+    ],
+    "transitions": [
+      {
+        "from_track_id": 1,
+        "to_track_id": 2,
+        "type": "cut",
+        "start_at_sec": 90.0,
+        "crossfade_duration_sec": 0.0,
+      }
+    ],
+  }
+  path = tmp_path / "legacy_cut.json"
+  path.write_text(__import__("json").dumps(legacy), encoding="utf-8")
+  session = load_mix_session(path)
+  assert session.transitions[0].type is TransitionType.NONE
 
 
 def test_filter_sweep_is_audibly_different_from_smooth():

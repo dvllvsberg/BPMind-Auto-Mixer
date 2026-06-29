@@ -39,31 +39,17 @@ def staged_tail_blend(
   solo_incoming: np.ndarray | None = None,
 ) -> np.ndarray:
   """Сначала только outgoing (или solo_incoming поверх), в конце — crossfade с входящим."""
-  overlap = len(outgoing_processed)
-  if overlap == 0:
-    return outgoing_processed
+  from engine.transitions.lanes import render_staged_blend
 
-  blend_frames = min(sec_to_frames(incoming_blend_sec), overlap)
-  solo_frames = max(0, overlap - blend_frames)
-  mixed = outgoing_processed.astype(np.float32, copy=True)
-
-  if solo_incoming is not None and solo_frames > 0:
-    solo_slice = solo_incoming[:solo_frames]
-    if solo_slice.shape == mixed[:solo_frames].shape:
-      mixed[:solo_frames] = (
-        mixed[:solo_frames] * 0.55 + solo_slice * 0.45
-      ).astype(np.float32, copy=False)
-
-  if blend_frames <= 0:
-    return mixed
-
-  ramp = np.linspace(0.0, 1.0, blend_frames, dtype=np.float32).reshape(-1, 1)
-  fade_in = np.power(ramp, incoming_fade_power)
-  fade_out = np.power(1.0 - ramp, outgoing_fade_power)
-  mixed[solo_frames:] = (
-    outgoing_processed[solo_frames:] * fade_out + incoming_head[solo_frames:] * fade_in
-  ).astype(np.float32, copy=False)
-  return mixed
+  return render_staged_blend(
+    outgoing_processed,
+    incoming_head,
+    incoming_blend_sec=incoming_blend_sec,
+    incoming_fade_power=incoming_fade_power,
+    outgoing_fade_power=outgoing_fade_power,
+    solo_incoming=solo_incoming,
+    pin_tail_to_incoming=False,
+  ).as_overlap_chunk()
 
 
 def blend_sec_for_overlap(overlap: int, *, min_sec: float, overlap_fraction: float) -> float:

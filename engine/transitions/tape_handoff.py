@@ -102,7 +102,7 @@ def weld_reverse_export_boundary(
   *,
   sr: int = TAPE_HANDOFF_SR,
 ) -> np.ndarray:
-  """Подтянуть тихий хвост overlap к началу main body B (без удвоения длины)."""
+  """Сшивка overlap reverse → main body B в экспорте (короткий crossfade на стыке чанков)."""
   audio = _ensure_2d(audio).astype(np.float32, copy=True)
   weld = int(round(REVERSE_HANDOFF_WINDOW_SEC * sr))
   weld = min(weld, boundary, len(audio) - boundary)

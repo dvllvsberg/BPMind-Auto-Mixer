@@ -17,6 +17,7 @@ class MixGeneratorConfig:
   track_play_ratio: float = 0.75
   groove_weight: float = 0.35
   bpm_max_distance: float = 20.0
+  full_track_playback: bool = False
 
 
 class MixGeneratorError(Exception):
@@ -151,12 +152,15 @@ class MixGenerator:
 
     for index, track in enumerate(ordered):
       assert track.id is not None
-      content_start, _ = _content_bounds(track)
-      play_until = _default_play_until(
-        track,
-        planning_crossfade_sec(self._config.crossfade_duration_sec),
-        play_ratio=self._config.track_play_ratio,
-      )
+      content_start, content_end = _content_bounds(track)
+      if self._config.full_track_playback:
+        play_until = round(content_end, 3)
+      else:
+        play_until = _default_play_until(
+          track,
+          planning_crossfade_sec(self._config.crossfade_duration_sec),
+          play_ratio=self._config.track_play_ratio,
+        )
       session_tracks.append(
         MixSessionTrack(
           track_id=track.id,

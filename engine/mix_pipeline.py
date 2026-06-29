@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime
 
-from engine.domain.enums import StartMode
+from engine.domain.enums import StartMode, TransitionType
 from engine.domain.models import MixSession, Track
 from engine.mix_generator.mix_generator import MixGenerator, MixGeneratorConfig
 from engine.transitions.modes import TransitionMode
@@ -21,13 +21,6 @@ def build_mix_session(
   transition_plan_config: TransitionPlanConfig | None = None,
 ) -> MixSession:
   generator = MixGenerator(generator_config)
-  ordered = generator.generate(
-    tracks,
-    start_mode,
-    start_track_id=start_track_id,
-    seed=mix_seed,
-  )
-
   tracks_by_id = {track.id: track for track in tracks if track.id is not None}
   plan_config = transition_plan_config or TransitionPlanConfig(
     mode=transition_mode,
@@ -36,6 +29,17 @@ def build_mix_session(
   )
   if plan_config.mode is not transition_mode:
     plan_config = replace(plan_config, mode=transition_mode)
+
+  full_track_playback = plan_config.mode is TransitionMode.NONE
+  if full_track_playback and not generator_config.full_track_playback:
+    generator = MixGenerator(replace(generator_config, full_track_playback=True))
+
+  ordered = generator.generate(
+    tracks,
+    start_mode,
+    start_track_id=start_track_id,
+    seed=mix_seed,
+  )
 
   transitions = TransitionPlanner().plan(ordered, tracks_by_id, plan_config)
 

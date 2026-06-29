@@ -31,7 +31,7 @@ _DURATION_PRESETS: dict[TransitionType, DurationPreset] = {
   TransitionType.REVERSE_SWELL: DurationPreset(1.5, 2.5, 4.0, max_cap_ratio=0.38),
   TransitionType.TAPE_STOP: DurationPreset(4.0, 6.0, 10.0, max_cap_ratio=0.9),
   TransitionType.VINYL_BRAKE: DurationPreset(1.0, 1.5, 3.0, max_cap_ratio=0.4),
-  TransitionType.CUT: DurationPreset(0.0, 0.0, 0.0, max_cap_ratio=0.0),
+  TransitionType.NONE: DurationPreset(0.0, 0.0, 0.0, max_cap_ratio=0.0),
 }
 
 
@@ -129,7 +129,7 @@ def compute_transition_duration_sec(
   auto_duration: bool = True,
 ) -> float:
   normalized = profile.normalized()
-  if normalized is TransitionType.CUT:
+  if normalized is TransitionType.NONE:
     return 0.0
 
   if not auto_duration:

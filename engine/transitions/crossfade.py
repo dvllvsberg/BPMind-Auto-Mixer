@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 
+from engine.transitions.lanes import (
+  JunctionLane,
+  JunctionRender,
+  align_junction,
+  empty_junction_render,
+  mix_lanes,
+  pin_overlap_tail,
+)
+from engine.transitions.overlap_utils import OVERLAP_SR
+
 
 def crossfade_segments(
   outgoing: np.ndarray,
@@ -32,6 +42,39 @@ def crossfade_segments(
   fade_out = np.power(1.0 - ramp, outgoing_release)
 
   return (out_tail * fade_out + in_head * fade_in).astype(np.float32)
+
+
+def render_crossfade_junction(
+  outgoing: np.ndarray,
+  incoming: np.ndarray,
+  *,
+  incoming_delay: float = 1.0,
+  outgoing_release: float = 1.0,
+) -> JunctionRender:
+  if outgoing.size == 0:
+    return JunctionRender(incoming.astype(np.float32, copy=False))
+  if incoming.size == 0:
+    return JunctionRender(outgoing.astype(np.float32, copy=False))
+
+  tail, head, overlap = align_junction(outgoing, incoming)
+  if overlap == 0:
+    return empty_junction_render(tail.shape[1] if tail.size else 2)
+
+  ramp = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
+  fade_in = np.power(ramp, incoming_delay).reshape(-1, 1)
+  fade_out = np.power(1.0 - ramp, outgoing_release).reshape(-1, 1)
+
+  lanes = (
+    JunctionLane(tail, fade_out),
+    JunctionLane(head, fade_in),
+  )
+  mixed = pin_overlap_tail(mix_lanes(list(lanes)), head[-1])
+  return JunctionRender(
+    overlap_audio=mixed,
+    incoming_main_skip_sec=overlap / OVERLAP_SR,
+    lanes=lanes,
+    lane_labels=("outgoing", "incoming"),
+  )
 
 
 def resample_audio(audio: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:

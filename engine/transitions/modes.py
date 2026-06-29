@@ -7,3 +7,4 @@ class TransitionMode(str, Enum):
   AUTO = "auto"
   FIXED = "fixed"
   RANDOM = "random"
+  NONE = "none"

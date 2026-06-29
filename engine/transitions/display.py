@@ -7,7 +7,7 @@ from engine.domain.models import MixSession, PlannedTransition
 
 _PROFILE_LABELS: dict[TransitionType, str] = {
   TransitionType.SMOOTH_BLEND: "плавный",
-  TransitionType.CUT: "резкий",
+  TransitionType.NONE: "нет",
   TransitionType.FILTER_SWEEP: "фильтр (LP)",
   TransitionType.ECHO_OUT: "reverb",
   TransitionType.BASS_SWAP: "бас-своп",
@@ -27,7 +27,6 @@ DEBUG_TRANSITION_PROFILES: tuple[TransitionType, ...] = (
   TransitionType.REVERSE_SWELL,
   TransitionType.TAPE_STOP,
   TransitionType.VINYL_BRAKE,
-  TransitionType.CUT,
 )
 
 

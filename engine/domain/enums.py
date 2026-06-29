@@ -17,7 +17,7 @@ class AnalysisLevel(str, Enum):
 
 class TransitionType(str, Enum):
   SMOOTH_BLEND = "smooth_blend"
-  CUT = "cut"
+  NONE = "none"
   FILTER_SWEEP = "filter_sweep"
   ECHO_OUT = "echo_out"
   BASS_SWAP = "bass_swap"
@@ -31,6 +31,8 @@ class TransitionType(str, Enum):
   def parse(cls, value: str) -> "TransitionType":
     if value == "crossfade":
       return cls.SMOOTH_BLEND
+    if value == "cut":
+      return cls.NONE
     return cls(value)
 
   def normalized(self) -> "TransitionType":

@@ -12,13 +12,19 @@ import sounddevice as sd
 from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition, Track
 from engine.playback.audio_loader import load_audio_segment
 from engine.playback.incoming_main import load_incoming_main_audio
+from engine.playback.segment_envelope import apply_opening_track_main_envelope
 from engine.playback.timeline_plan import SessionTimeline, TrackOutputPlan, build_session_timeline
 from engine.transitions.crossfade import resample_audio
 from engine.transitions.playback_rules import (
   incoming_play_start_sec,
   outgoing_tape_brake_sec,
   outgoing_tape_tail_sec,
+  transition_is_reverse_overlay,
   transition_is_solo_tail,
+)
+from engine.transitions.reverse_swell_motor import (
+  reverse_overlap_output_frames,
+  reverse_playback_skip_frames,
 )
 from engine.transitions.render_overlap import render_transition_overlap
 from engine.transitions.tape_handoff import blend_tape_track_seam
@@ -323,17 +329,37 @@ class SessionPlayer:
     if track is None:
       return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
 
-    start_sec = item.play_from_sec
+    load_from_sec = item.play_from_sec
+    output_skip_frames = 0
     prev_transition: PlannedTransition | None = None
     if index > 0 and self._enable_crossfade and not skip_crossfade:
       prev_item = self._session.tracks[index - 1]
       prev_transition = self._transition_from(prev_item.track_id)
-      start_sec = incoming_play_start_sec(
-        item.play_from_sec,
-        prev_transition,
-        enable_crossfade=True,
-        incoming_track_id=item.track_id,
-      )
+      if prev_transition is not None and transition_is_reverse_overlay(prev_transition.type):
+        prev_track = self._tracks_by_id.get(prev_item.track_id)
+        prev_until = self._effective_until(prev_item, prev_track) if prev_track else None
+        if prev_until is not None:
+          overlap_frames = reverse_overlap_output_frames(
+            play_from_sec=item.play_from_sec,
+            crossfade_duration_sec=prev_transition.crossfade_duration_sec,
+            outgoing_until_sec=prev_until,
+          )
+          output_skip_frames = reverse_playback_skip_frames(
+            track_path=track.path,
+            play_from_sec=item.play_from_sec,
+            crossfade_duration_sec=prev_transition.crossfade_duration_sec,
+            overlap_frames=overlap_frames,
+          )
+      else:
+        load_from_sec = incoming_play_start_sec(
+          item.play_from_sec,
+          prev_transition,
+          enable_crossfade=True,
+          incoming_track_id=item.track_id,
+        )
+      start_sec = load_from_sec
+    else:
+      start_sec = item.play_from_sec
 
     until_sec = self._effective_until(item, track)
     next_transition = self._transition_from(item.track_id) if index + 1 < len(self._session.tracks) else None
@@ -345,19 +371,33 @@ class SessionPlayer:
 
     main_end = until_sec
     if until_sec is not None and fade_sec > 0:
-      main_end = max(start_sec, until_sec - fade_sec)
-    if main_end is None or main_end <= start_sec:
+      main_end = max(load_from_sec, until_sec - fade_sec)
+    if main_end is None or main_end <= load_from_sec:
       return np.zeros((0, OUTPUT_CHANNELS), dtype=np.float32)
 
-    return load_incoming_main_audio(
+    audio = load_incoming_main_audio(
       track.path,
-      start_sec,
+      load_from_sec,
       main_end,
       prev_transition,
       enable_crossfade=self._enable_crossfade and not skip_crossfade,
       incoming_track_id=item.track_id,
       normalize_fn=_normalize_audio,
+      output_skip_frames=output_skip_frames,
     )
+    if index == 0 and len(audio) > 0:
+      has_next_transition = (
+        next_transition is not None
+        and self._enable_crossfade
+        and not skip_crossfade
+        and index + 1 < len(self._session.tracks)
+        and fade_sec > 0
+      )
+      audio = apply_opening_track_main_envelope(
+        audio,
+        apply_fade_out=not has_next_transition,
+      )
+    return audio
 
   def _schedule_incoming_preload(self, index: int, *, skip_crossfade: bool) -> None:
     if skip_crossfade or not self._enable_crossfade:

@@ -146,7 +146,7 @@ def test_planner_cut_has_zero_duration():
     tracks_by_id,
     TransitionPlanConfig(
       mode=TransitionMode.FIXED,
-      fixed_profile=TransitionType.CUT,
+      fixed_profile=TransitionType.NONE,
       crossfade_duration_sec=8.0,
     ),
   )

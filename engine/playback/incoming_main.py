@@ -39,6 +39,7 @@ def load_incoming_main_audio(
   enable_crossfade: bool,
   incoming_track_id: int,
   normalize_fn: Callable[[np.ndarray, int], np.ndarray],
+  output_skip_frames: int = 0,
 ) -> np.ndarray:
   if end_sec <= start_sec:
     return np.zeros((0, 2), dtype=np.float32)
@@ -57,9 +58,14 @@ def load_incoming_main_audio(
   )
   effective_start = start_sec + intro_skip
 
+  def _trim_skip(audio: np.ndarray) -> np.ndarray:
+    if output_skip_frames <= 0 or len(audio) == 0:
+      return audio
+    return audio[output_skip_frames:].astype(np.float32, copy=False)
+
   if spin_sec <= 0.0:
     audio, sr = load_audio_segment(track_path, effective_start, end_sec)
-    return normalize_fn(audio, sr)
+    return _trim_skip(normalize_fn(audio, sr))
 
   spin_end = min(effective_start + spin_sec, end_sec)
   head, sr_head = load_audio_segment(track_path, effective_start, spin_end)
@@ -68,12 +74,12 @@ def load_incoming_main_audio(
     head = tape_motor_start_incoming(head)
 
   if spin_end >= end_sec - 1e-6:
-    return head
+    return _trim_skip(head)
 
   body, sr_body = load_audio_segment(track_path, spin_end, end_sec)
   body = normalize_fn(body, sr_body)
   if len(head) == 0:
-    return body
+    return _trim_skip(body)
   if len(body) == 0:
-    return head
-  return np.concatenate([head, body], axis=0)
+    return _trim_skip(head)
+  return _trim_skip(np.concatenate([head, body], axis=0))
