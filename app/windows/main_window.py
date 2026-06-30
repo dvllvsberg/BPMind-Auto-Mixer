@@ -5,9 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-  QCheckBox,
   QComboBox,
-  QDoubleSpinBox,
   QFileDialog,
   QGroupBox,
   QHBoxLayout,
@@ -19,35 +17,26 @@ from PySide6.QtWidgets import (
   QProgressBar,
   QPushButton,
   QSlider,
-  QSpinBox,
+  QSizePolicy,
   QVBoxLayout,
   QWidget,
 )
 
-from app.mix_settings import format_auto_profile_hint, uses_auto_mix_settings
 from app.paths import (
   default_db_path,
-  default_library_profile_path,
   default_mix_path,
   exports_dir,
   load_settings,
   mixes_dir,
   save_settings,
 )
+from app.ui.icons import folder_icon, make_icon_button, settings_icon
 from app.ui.timeline_widget import MixTimelineWidget, format_time
 from app.workers import ExportAudioWorker, MixBuildWorker, ScanAnalyzeWorker, track_label
 from engine.database.repository import TrackRepository
 from engine.domain.enums import AnalysisLevel, StartMode, TransitionType
 from engine.domain.models import MixSession, PlannedTransition, Track
-from engine.library.library_profile import (
-  compute_library_profile,
-  load_library_profile,
-  profile_tuning_for_mode,
-  save_library_profile,
-)
 from engine.mix_generator.recipe_library import (
-  format_recipe_list_label,
-  list_recipe_files,
   recipe_file_stem,
   recipe_path_for_name,
   sanitize_recipe_name,
@@ -57,8 +46,8 @@ from engine.mix_generator.recipe_metadata import MixRecipeMetadata
 from engine.mix_generator.session_store import load_mix_recipe, load_mix_session, save_mix_recipe
 from engine.playback.session_player import PlayerState, SessionPlayer
 from engine.playback.timeline_plan import SessionTimeline, build_session_timeline
+from app.windows.settings_window import SettingsWindow
 from engine.transitions.display import (
-  DEBUG_TRANSITION_PROFILES,
   format_transition_arrow,
   summarize_session_transitions,
   transition_profile_label,
@@ -77,15 +66,20 @@ def _mix_list_label(
   list_index: int,
   transition: PlannedTransition | None = None,
 ) -> str:
-  base = _start_track_combo_label(track, list_index=list_index)
-  return base + format_transition_arrow(transition)
+  title = track_label(track)
+  bpm = f"{track.bpm:.0f}" if track.bpm else "?"
+  suffix = ""
+  if transition is not None and transition.type.normalized() is not TransitionType.NONE:
+    suffix = f"  ·  {transition_profile_label(transition.type)}"
+  return f"{list_index:02d}   {title}   ·   {bpm} BPM{suffix}"
 
 
 class MainWindow(QWidget):
   def __init__(self) -> None:
     super().__init__()
     self.setWindowTitle("BPMind Auto Mixer")
-    self.setMinimumWidth(560)
+    self.setMinimumWidth(520)
+    self.setMinimumHeight(480)
 
     self._player: SessionPlayer | None = None
     self._tracks_by_id: dict[int, object] = {}
@@ -96,7 +90,6 @@ class MainWindow(QWidget):
     self._ending_session = False
     self._session_timeline: SessionTimeline | None = None
     self._transitions_by_from: dict[int, PlannedTransition] = {}
-    self._applying_profile = False
 
     settings = load_settings()
     saved_folder = settings.get("library_path", "")
@@ -104,19 +97,22 @@ class MainWindow(QWidget):
     self._folder_edit = QLineEdit(saved_folder)
     self._folder_edit.setPlaceholderText("Папка с музыкой")
     self._folder_edit.setReadOnly(True)
+    self._folder_edit.setMaximumWidth(300)
 
-    browse_btn = QPushButton("Выбрать папку")
+    browse_btn = make_icon_button(
+      folder_icon(self),
+      tooltip="Выбрать папку",
+    )
     browse_btn.clicked.connect(self._choose_folder)
 
-    self._force_analyze_cb = QCheckBox("Пересчитать анализ")
-    self._force_analyze_cb.setToolTip("Как --force в CLI: переанализировать все треки")
-
-    self._quick_only_cb = QCheckBox("Только быстрый анализ")
-    self._quick_only_cb.setToolTip(
-      "По умолчанию после скана выполняется и глубокий анализ (энергия, переходы, groove)"
+    self._settings_btn = make_icon_button(
+      settings_icon(self),
+      tooltip="Настройки — параметры микса, анализа, переходов и сохранённые сеты",
     )
-    self._quick_only_cb.setChecked(bool(settings.get("quick_analyze_only", False)))
-    self._quick_only_cb.toggled.connect(self._on_quick_only_toggled)
+    self._settings_btn.clicked.connect(self._open_settings)
+
+    self._settings = SettingsWindow(self)
+    self._settings.recipe_open_requested.connect(self._load_recipe_from_path)
 
     self._scan_btn = QPushButton("Сканировать и анализировать")
     self._scan_btn.clicked.connect(self._start_scan_analyze)
@@ -128,22 +124,6 @@ class MainWindow(QWidget):
     self._mode_combo.addItem("Случайный (random)", StartMode.RANDOM.value)
     self._mode_combo.addItem("С трека (from_track)", StartMode.FROM_TRACK.value)
     self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-
-    self._use_seed_cb = QCheckBox("Повторять случайный порядок")
-    self._use_seed_cb.setToolTip(
-      "Только random/wave. Чтобы сохранить понравившийся микс — «Сохранить сет», не эта опция."
-    )
-    self._use_seed_cb.toggled.connect(self._on_use_seed_toggled)
-    self._seed_spin = QSpinBox()
-    self._seed_spin.setRange(1, 2_147_483_647)
-    self._seed_spin.setEnabled(False)
-    self._seed_spin.setToolTip("Номер варианта случайной сборки (для CLI и продвинутых сценариев)")
-    self._seed_spin.valueChanged.connect(self._save_seed_settings)
-    saved_seed = settings.get("mix_seed")
-    if saved_seed is not None:
-      self._use_seed_cb.setChecked(True)
-      self._seed_spin.setEnabled(True)
-      self._seed_spin.setValue(int(saved_seed))
 
     self._start_track_combo = QComboBox()
     self._start_track_combo.setVisible(False)
@@ -164,60 +144,11 @@ class MainWindow(QWidget):
     self._export_audio_btn.setToolTip("Сохранить микс в MP3 (320 kbps) или WAV (44.1 kHz, 16-bit)")
     self._export_audio_btn.clicked.connect(self._export_current_mix_audio)
 
-    self._length_spin = QSpinBox()
-    self._length_spin.setRange(2, 50)
-    self._length_spin.setValue(int(settings.get("session_length_tracks", 12)))
-    self._length_spin.setSuffix(" тр.")
-    self._length_spin.valueChanged.connect(self._save_mix_settings)
-
-    self._crossfade_spin = QDoubleSpinBox()
-    self._crossfade_spin.setRange(2.0, 30.0)
-    self._crossfade_spin.setSingleStep(0.5)
-    self._crossfade_spin.setDecimals(1)
-    self._crossfade_spin.setSuffix(" с")
-    self._crossfade_spin.setValue(float(settings.get("crossfade_duration_sec", 8.0)))
-    self._crossfade_spin.valueChanged.connect(self._save_mix_settings)
-
-    play_ratio_pct = int(float(settings.get("track_play_ratio", 0.75)) * 100)
-    self._play_ratio_slider = QSlider(Qt.Orientation.Horizontal)
-    self._play_ratio_slider.setRange(50, 95)
-    self._play_ratio_slider.setValue(play_ratio_pct)
-    self._play_ratio_slider.setToolTip(
-      "Минимальная доля трека перед переходом. "
-      "Ниже — короче фрагменты, выше — длиннее. Deep-анализ может сдвинуть точку позже."
-    )
-    self._play_ratio_slider.valueChanged.connect(self._on_play_ratio_changed)
-    self._play_ratio_label = QLabel(f"{play_ratio_pct}%")
-
-    groove_pct = int(float(settings.get("groove_weight", 0.35)) * 100)
-    self._groove_slider = QSlider(Qt.Orientation.Horizontal)
-    self._groove_slider.setRange(0, 35)
-    self._groove_slider.setValue(groove_pct)
-    self._groove_slider.setToolTip(
-      "Насколько сильно подбирать пары по groove (хвост → голова следующего трека). "
-      "0 — только BPM и громкость."
-    )
-    self._groove_slider.valueChanged.connect(self._on_groove_changed)
-    self._groove_label = QLabel(f"{groove_pct}%")
-
-    self._auto_profile_label = QLabel("")
-    self._auto_profile_label.setWordWrap(True)
-    self._auto_profile_label.setStyleSheet("color: palette(mid);")
-
-    self._advanced_btn = QPushButton("▸ Дополнительно")
-    self._advanced_btn.setFlat(True)
-    self._advanced_btn.setCheckable(True)
-    self._advanced_btn.setChecked(bool(settings.get("advanced_settings_expanded", False)))
-    self._advanced_btn.toggled.connect(self._on_advanced_toggled)
-
-    self._reset_auto_btn = QPushButton("Сбросить к авто")
-    self._reset_auto_btn.setToolTip("Вернуть параметры микса, подобранные под библиотеку")
-    self._reset_auto_btn.clicked.connect(self._reset_to_auto_profile)
-
-    self._advanced_panel = QWidget()
-
     self._progress = QProgressBar()
-    self._progress.setVisible(False)
+    self._progress.setFixedHeight(18)
+    self._progress.setTextVisible(False)
+    self._progress.setValue(0)
+    self._progress.setMaximum(1)
 
     self._status = QLabel("Готов к работе")
     self._status.setWordWrap(True)
@@ -237,22 +168,17 @@ class MainWindow(QWidget):
     self._volume_slider.setToolTip("Громкость воспроизведения")
     self._volume_slider.valueChanged.connect(self._on_volume_changed)
 
-    self._saved_recipes_list = QListWidget()
-    self._saved_recipes_list.setMinimumHeight(72)
-    self._saved_recipes_list.setMaximumHeight(120)
-    self._saved_recipes_list.setToolTip("Двойной клик — открыть сохранённый сет")
-    self._saved_recipes_list.itemDoubleClicked.connect(self._on_saved_recipe_activated)
-
     self._mix_list = QListWidget()
-    self._mix_list.setMinimumHeight(140)
+    self._mix_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    self._mix_list.setMinimumHeight(180)
     self._mix_list.setToolTip("Клик — перейти к треку (или начать с него, если плеер остановлен)")
     self._mix_list.itemClicked.connect(self._on_mix_track_clicked)
 
-    self._play_btn = QPushButton("Play")
-    self._pause_btn = QPushButton("Pause")
-    self._next_btn = QPushButton("Next")
-    self._prev_btn = QPushButton("Prev")
-    self._stop_btn = QPushButton("Stop")
+    self._play_btn = QPushButton("▶")
+    self._pause_btn = QPushButton("⏸")
+    self._next_btn = QPushButton("⏭")
+    self._prev_btn = QPushButton("⏮")
+    self._stop_btn = QPushButton("⏹")
 
     self._play_btn.clicked.connect(self._play)
     self._pause_btn.clicked.connect(self._toggle_pause)
@@ -263,12 +189,11 @@ class MainWindow(QWidget):
     self._set_playback_enabled(False)
 
     folder_row = QHBoxLayout()
-    folder_row.addWidget(self._folder_edit, stretch=1)
+    folder_row.addWidget(self._folder_edit)
     folder_row.addWidget(browse_btn)
-
-    scan_row = QHBoxLayout()
-    scan_row.addWidget(self._scan_btn)
-    scan_row.addStretch()
+    folder_row.addWidget(self._scan_btn)
+    folder_row.addWidget(self._settings_btn)
+    folder_row.addStretch()
 
     mix_row = QHBoxLayout()
     mix_row.addWidget(self._mode_combo)
@@ -278,136 +203,45 @@ class MainWindow(QWidget):
     mix_row.addWidget(self._open_recipe_btn)
     mix_row.addWidget(self._export_audio_btn)
 
-    settings_row = QHBoxLayout()
-    settings_row.addWidget(QLabel("Длина сета:"))
-    settings_row.addWidget(self._length_spin)
-    settings_row.addSpacing(12)
-    settings_row.addWidget(QLabel("Макс. переход:"))
-    self._crossfade_spin.setToolTip(
-      "Верхняя граница длины каждого перехода. Реальная длина зависит от типа эффекта и BPM. "
-      "После изменения пересоберите микс."
-    )
-    settings_row.addWidget(self._crossfade_spin)
-    settings_row.addStretch()
-
-    play_ratio_row = QHBoxLayout()
-    play_ratio_row.addWidget(QLabel("Играть трека:"))
-    play_ratio_row.addWidget(self._play_ratio_slider, stretch=1)
-    play_ratio_row.addWidget(self._play_ratio_label)
-
-    groove_row = QHBoxLayout()
-    groove_row.addWidget(QLabel("Groove / пары:"))
-    groove_row.addWidget(self._groove_slider, stretch=1)
-    groove_row.addWidget(self._groove_label)
-
-    advanced_layout = QVBoxLayout(self._advanced_panel)
-    advanced_layout.setContentsMargins(16, 0, 0, 0)
-    scan_opts_row = QHBoxLayout()
-    scan_opts_row.addWidget(self._force_analyze_cb)
-    scan_opts_row.addWidget(self._quick_only_cb)
-    scan_opts_row.addStretch()
-    advanced_layout.addLayout(scan_opts_row)
-    advanced_layout.addLayout(settings_row)
-    advanced_layout.addLayout(play_ratio_row)
-    advanced_layout.addLayout(groove_row)
-    seed_row = QHBoxLayout()
-    seed_row.addWidget(self._use_seed_cb)
-    seed_row.addWidget(self._seed_spin)
-    seed_row.addStretch()
-    advanced_layout.addLayout(seed_row)
-
-    self._transition_mode_combo = QComboBox()
-    self._transition_mode_combo.addItem("Авто (DJ)", TransitionMode.AUTO.value)
-    self._transition_mode_combo.addItem("Фиксированный (тест)", TransitionMode.FIXED.value)
-    self._transition_mode_combo.addItem("Случайный", TransitionMode.RANDOM.value)
-    self._transition_mode_combo.addItem("Нет", TransitionMode.NONE.value)
-    self._transition_mode_combo.setToolTip(
-      "Авто — умный выбор переходов.\n"
-      "Фиксированный — один профиль на все стыковки (удобно слушать tape, удар, реверс).\n"
-      "Случайный — случайный профиль на каждый переход.\n"
-      "Нет — без эффектов, треки целиком."
-    )
-    self._transition_mode_combo.currentIndexChanged.connect(self._on_transition_mode_changed)
-    self._transition_mode_combo.currentIndexChanged.connect(self._save_transition_settings)
-
-    self._transition_profile_combo = QComboBox()
-    for profile in DEBUG_TRANSITION_PROFILES:
-      self._transition_profile_combo.addItem(
-        transition_profile_label(profile),
-        profile.value,
-      )
-    self._transition_profile_combo.setToolTip("Профиль для режима «Фиксированный (тест)»")
-    self._transition_profile_combo.currentIndexChanged.connect(self._save_transition_settings)
-
-    saved_transition_mode = settings.get("transition_mode", TransitionMode.AUTO.value)
-    saved_profile = settings.get("transition_profile", TransitionType.TAPE_STOP.value)
-    if saved_profile in ("none", "cut") and saved_transition_mode == TransitionMode.FIXED.value:
-      saved_transition_mode = TransitionMode.NONE.value
-    mode_index = self._transition_mode_combo.findData(saved_transition_mode)
-    if mode_index >= 0:
-      self._transition_mode_combo.setCurrentIndex(mode_index)
-    saved_profile = settings.get("transition_profile", TransitionType.TAPE_STOP.value)
-    if saved_profile == "cut":
-      saved_profile = TransitionType.TAPE_STOP.value
-    profile_index = self._transition_profile_combo.findData(saved_profile)
-    if profile_index >= 0:
-      self._transition_profile_combo.setCurrentIndex(profile_index)
-    self._on_transition_mode_changed(self._transition_mode_combo.currentIndex())
-
-    transition_row = QHBoxLayout()
-    transition_row.addWidget(QLabel("Переходы:"))
-    transition_row.addWidget(self._transition_mode_combo, stretch=1)
-    transition_row.addWidget(self._transition_profile_combo, stretch=1)
-    advanced_layout.addLayout(transition_row)
-
-    reset_row = QHBoxLayout()
-    reset_row.addWidget(self._reset_auto_btn)
-    reset_row.addStretch()
-    advanced_layout.addLayout(reset_row)
-
-    self._advanced_panel.setVisible(self._advanced_btn.isChecked())
-    self._on_advanced_toggled(self._advanced_btn.isChecked())
+    timeline_row = QHBoxLayout()
+    timeline_row.addWidget(self._timeline_widget, stretch=1)
+    timeline_row.addWidget(self._time_label)
 
     transport_row = QHBoxLayout()
+    transport_row.addStretch()
+    transport_row.addWidget(self._prev_btn)
     transport_row.addWidget(self._play_btn)
     transport_row.addWidget(self._pause_btn)
-    transport_row.addWidget(self._prev_btn)
     transport_row.addWidget(self._next_btn)
     transport_row.addWidget(self._stop_btn)
+    transport_row.addStretch()
 
-    playback_box = QGroupBox("Воспроизведение")
+    volume_row = QHBoxLayout()
+    volume_row.addWidget(QLabel("Громкость"))
+    volume_row.addWidget(self._volume_slider, stretch=1)
+
+    playback_box = QGroupBox("Плеер")
     playback_layout = QVBoxLayout(playback_box)
     playback_layout.addWidget(self._now_label)
     playback_layout.addWidget(self._next_label)
-    playback_layout.addWidget(self._time_label)
-    playback_layout.addWidget(self._timeline_widget)
-    volume_row = QHBoxLayout()
-    volume_row.addWidget(QLabel("Громкость"))
-    volume_row.addWidget(self._volume_slider)
-    playback_layout.addLayout(volume_row)
+    playback_layout.addLayout(timeline_row)
     playback_layout.addLayout(transport_row)
+    playback_layout.addLayout(volume_row)
 
-    mix_box = QGroupBox("Сет")
-    mix_layout = QVBoxLayout(mix_box)
-    mix_layout.addWidget(QLabel("Сохранённые сеты"))
-    mix_layout.addWidget(self._saved_recipes_list)
+    playlist_box = QGroupBox("Плейлист")
+    playlist_layout = QVBoxLayout(playlist_box)
     self._transitions_summary_label = QLabel("")
     self._transitions_summary_label.setWordWrap(True)
     self._transitions_summary_label.setStyleSheet("color: palette(mid);")
-    mix_layout.addWidget(self._transitions_summary_label)
-    mix_layout.addWidget(QLabel("Текущий сет"))
-    mix_layout.addWidget(self._mix_list)
+    playlist_layout.addWidget(self._transitions_summary_label)
+    playlist_layout.addWidget(self._mix_list, stretch=1)
 
     layout = QVBoxLayout(self)
     layout.addLayout(folder_row)
-    layout.addLayout(scan_row)
     layout.addLayout(mix_row)
-    layout.addWidget(self._auto_profile_label)
-    layout.addWidget(self._advanced_btn)
-    layout.addWidget(self._advanced_panel)
     layout.addWidget(self._progress)
     layout.addWidget(self._status)
-    layout.addWidget(mix_box)
+    layout.addWidget(playlist_box, stretch=1)
     layout.addWidget(playback_box)
 
     self._ui_timer = QTimer(self)
@@ -415,8 +249,7 @@ class MainWindow(QWidget):
     self._ui_timer.timeout.connect(self._refresh_playback_ui)
 
     self._refresh_start_track_combo()
-    self._reload_library_profile_ui()
-    self._refresh_saved_recipes_list()
+    self._settings.reload_library_profile_ui(StartMode.CALM)
     self._on_mode_changed()
 
     if default_mix_path().exists():
@@ -425,120 +258,21 @@ class MainWindow(QWidget):
 
   def closeEvent(self, event) -> None:  # noqa: N802
     self._stop_playback()
+    self._settings.close()
     super().closeEvent(event)
 
-  def _save_mix_settings(self) -> None:
-    if self._applying_profile:
-      return
-    settings = load_settings()
-    settings["session_length_tracks"] = self._length_spin.value()
-    settings["crossfade_duration_sec"] = self._crossfade_spin.value()
-    settings["track_play_ratio"] = self._play_ratio_slider.value() / 100.0
-    settings["groove_weight"] = self._groove_slider.value() / 100.0
-    settings["mix_settings_manual"] = True
-    save_settings(settings)
-    self._refresh_auto_profile_hint()
+  def current_start_mode(self) -> StartMode:
+    return StartMode(self._mode_combo.currentData())
 
-  def _on_play_ratio_changed(self, value: int) -> None:
-    self._play_ratio_label.setText(f"{value}%")
-    self._save_mix_settings()
+  def _open_settings(self) -> None:
+    self._settings.on_start_mode_changed(self.current_start_mode())
+    self._settings.show()
+    self._settings.raise_()
+    self._settings.activateWindow()
 
-  def _on_groove_changed(self, value: int) -> None:
-    self._groove_label.setText(f"{value}%")
-    self._save_mix_settings()
-
-  def _on_advanced_toggled(self, expanded: bool) -> None:
-    self._advanced_panel.setVisible(expanded)
-    self._advanced_btn.setText("▾ Дополнительно" if expanded else "▸ Дополнительно")
-    settings = load_settings()
-    settings["advanced_settings_expanded"] = expanded
-    save_settings(settings)
-
-  def _current_library_profile(self):
-    profile_path = default_library_profile_path()
-    profile = load_library_profile(profile_path)
-    if profile is not None:
-      return profile
-    if not default_db_path().exists():
-      return None
-    with TrackRepository(default_db_path()) as repo:
-      mixable = repo.list_mixable()
-    if not mixable:
-      return None
-    profile = compute_library_profile(mixable)
-    save_library_profile(profile, profile_path)
-    return profile
-
-  def _apply_profile_to_controls(self, profile) -> None:
-    mode = StartMode(self._mode_combo.currentData())
-    play_ratio, groove_weight = profile_tuning_for_mode(profile, mode)
-    self._applying_profile = True
-    try:
-      self._length_spin.blockSignals(True)
-      self._crossfade_spin.blockSignals(True)
-      self._play_ratio_slider.blockSignals(True)
-      self._groove_slider.blockSignals(True)
-
-      self._length_spin.setValue(profile.session_length_tracks)
-      self._crossfade_spin.setValue(profile.crossfade_duration_sec)
-      play_ratio_pct = int(play_ratio * 100)
-      groove_pct = int(groove_weight * 100)
-      self._play_ratio_slider.setValue(play_ratio_pct)
-      self._groove_slider.setValue(groove_pct)
-      self._play_ratio_label.setText(f"{play_ratio_pct}%")
-      self._groove_label.setText(f"{groove_pct}%")
-    finally:
-      self._length_spin.blockSignals(False)
-      self._crossfade_spin.blockSignals(False)
-      self._play_ratio_slider.blockSignals(False)
-      self._groove_slider.blockSignals(False)
-      self._applying_profile = False
-
-  def _refresh_auto_profile_hint(self) -> None:
-    settings = load_settings()
-    profile = self._current_library_profile()
-    mode = StartMode(self._mode_combo.currentData())
-    if profile is None:
-      self._auto_profile_label.setText("Просканируйте библиотеку — параметры микса подстроятся автоматически.")
-      self._reset_auto_btn.setEnabled(False)
-      return
-
-    self._reset_auto_btn.setEnabled(True)
-    hint = format_auto_profile_hint(profile, mode)
-    if uses_auto_mix_settings(settings):
-      self._auto_profile_label.setText(hint)
-    else:
-      self._auto_profile_label.setText(f"Ручная настройка. Авто: {hint}")
-
-  def _reload_library_profile_ui(self) -> None:
-    settings = load_settings()
-    profile = self._current_library_profile()
-    if profile is not None and uses_auto_mix_settings(settings):
-      self._apply_profile_to_controls(profile)
-    self._refresh_auto_profile_hint()
-
-  def _reset_to_auto_profile(self) -> None:
-    profile = self._current_library_profile()
-    if profile is None:
-      QMessageBox.information(
-        self,
-        "BPMind",
-        "Сначала просканируйте и проанализируйте библиотеку.",
-      )
-      return
-
-    mode = StartMode(self._mode_combo.currentData())
-    play_ratio, groove_weight = profile_tuning_for_mode(profile, mode)
-    settings = load_settings()
-    settings["mix_settings_manual"] = False
-    settings["session_length_tracks"] = profile.session_length_tracks
-    settings["crossfade_duration_sec"] = profile.crossfade_duration_sec
-    settings["track_play_ratio"] = play_ratio
-    settings["groove_weight"] = groove_weight
-    save_settings(settings)
-    self._apply_profile_to_controls(profile)
-    self._refresh_auto_profile_hint()
-    self._status.setText("Параметры микса сброшены к авто-профилю библиотеки.")
+  def _reset_progress(self) -> None:
+    self._progress.setValue(0)
+    self._progress.setMaximum(1)
 
   def _set_mode_combo(self, mode: StartMode) -> None:
     index = self._mode_combo.findData(mode.value)
@@ -549,108 +283,10 @@ class MainWindow(QWidget):
     self._mode_combo.blockSignals(False)
     self._start_track_combo.setVisible(mode == StartMode.FROM_TRACK)
 
-  def _on_quick_only_toggled(self, checked: bool) -> None:
-    settings = load_settings()
-    settings["quick_analyze_only"] = checked
-    save_settings(settings)
-
-  def _on_use_seed_toggled(self, checked: bool) -> None:
-    self._seed_spin.setEnabled(checked)
-    self._save_seed_settings()
-
-  def _save_seed_settings(self) -> None:
-    settings = load_settings()
-    if self._use_seed_cb.isChecked():
-      settings["mix_seed"] = self._seed_spin.value()
-    else:
-      settings.pop("mix_seed", None)
-    save_settings(settings)
-
-  def _on_transition_mode_changed(self, _index: int) -> None:
-    mode_value = self._transition_mode_combo.currentData()
-    fixed = mode_value == TransitionMode.FIXED.value
-    self._transition_profile_combo.setEnabled(fixed)
-    self._transition_profile_combo.setVisible(fixed)
-
-  def _save_transition_settings(self, *_args) -> None:
-    settings = load_settings()
-    mode_value = self._transition_mode_combo.currentData()
-    if mode_value:
-      settings["transition_mode"] = mode_value
-    profile_value = self._transition_profile_combo.currentData()
-    if profile_value:
-      settings["transition_profile"] = profile_value
-    save_settings(settings)
-
-  def _current_transition_plan(self) -> tuple[TransitionMode, TransitionType]:
-    mode_value = self._transition_mode_combo.currentData() or TransitionMode.AUTO.value
-    transition_mode = TransitionMode(mode_value)
-    profile_value = self._transition_profile_combo.currentData() or TransitionType.SMOOTH_BLEND.value
-    try:
-      fixed_profile = TransitionType.parse(profile_value)
-    except ValueError:
-      fixed_profile = TransitionType.SMOOTH_BLEND
-    return transition_mode, fixed_profile
-
-  def _current_mix_seed(self) -> int | None:
-    mode_value = self._mode_combo.currentData()
-    if mode_value not in (StartMode.RANDOM.value, StartMode.WAVE.value):
-      return None
-    if not self._use_seed_cb.isChecked():
-      return None
-    return self._seed_spin.value()
-
-  def _refresh_saved_recipes_list(self) -> None:
-    self._saved_recipes_list.clear()
-    target_dir = mixes_dir()
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for path in list_recipe_files(target_dir):
-      self._saved_recipes_list.addItem(format_recipe_list_label(path))
-      row = self._saved_recipes_list.count() - 1
-      self._saved_recipes_list.item(row).setData(Qt.ItemDataRole.UserRole, str(path))
-
-  def _on_saved_recipe_activated(self, item) -> None:
-    path_text = item.data(Qt.ItemDataRole.UserRole)
-    if not path_text:
-      return
-    self._load_recipe_from_path(Path(path_text))
-
   def _apply_recipe_metadata_to_ui(self, metadata: MixRecipeMetadata, session: MixSession) -> None:
     self._set_mode_combo(session.start_mode)
-    self._applying_profile = True
-    try:
-      settings = load_settings()
-      if metadata.mix_settings_manual is not None:
-        settings["mix_settings_manual"] = metadata.mix_settings_manual
-      if metadata.session_length_tracks is not None:
-        settings["session_length_tracks"] = metadata.session_length_tracks
-        self._length_spin.setValue(metadata.session_length_tracks)
-      if metadata.crossfade_duration_sec is not None:
-        settings["crossfade_duration_sec"] = metadata.crossfade_duration_sec
-        self._crossfade_spin.setValue(metadata.crossfade_duration_sec)
-      if metadata.track_play_ratio is not None:
-        settings["track_play_ratio"] = metadata.track_play_ratio
-        play_pct = int(metadata.track_play_ratio * 100)
-        self._play_ratio_slider.setValue(play_pct)
-        self._play_ratio_label.setText(f"{play_pct}%")
-      if metadata.groove_weight is not None:
-        settings["groove_weight"] = metadata.groove_weight
-        groove_pct = int(metadata.groove_weight * 100)
-        self._groove_slider.setValue(groove_pct)
-        self._groove_label.setText(f"{groove_pct}%")
-      if metadata.seed is not None:
-        settings["mix_seed"] = metadata.seed
-        self._use_seed_cb.blockSignals(True)
-        self._seed_spin.blockSignals(True)
-        self._use_seed_cb.setChecked(True)
-        self._seed_spin.setEnabled(True)
-        self._seed_spin.setValue(metadata.seed)
-        self._use_seed_cb.blockSignals(False)
-        self._seed_spin.blockSignals(False)
-      save_settings(settings)
-    finally:
-      self._applying_profile = False
-    self._refresh_auto_profile_hint()
+    self._settings.apply_recipe_metadata(metadata, session)
+    self._settings.on_start_mode_changed(session.start_mode)
 
   def _load_recipe_from_path(self, recipe_path: Path) -> bool:
     try:
@@ -729,7 +365,7 @@ class MainWindow(QWidget):
       seed=metadata.seed,
     )
     save_mix_recipe(session, target_path, metadata=recipe_metadata)
-    self._refresh_saved_recipes_list()
+    self._settings.refresh_saved_recipes_list()
     self._status.setText(f"Сет сохранён: {target_path.name}")
 
   def _open_saved_recipe(self) -> None:
@@ -784,8 +420,8 @@ class MainWindow(QWidget):
     export_label = "MP3" if path.lower().endswith(".mp3") else "WAV"
     self._export_audio_btn.setEnabled(False)
     self._mix_btn.setEnabled(False)
-    self._progress.setVisible(True)
     self._progress.setValue(0)
+    self._progress.setMaximum(100)
     self._status.setText(f"Экспорт {export_label}...")
 
     self._export_worker = ExportAudioWorker(Path(path))
@@ -803,7 +439,7 @@ class MainWindow(QWidget):
     self._status.setText(f"Экспорт [{index}/{total}]: {short}")
 
   def _on_export_finished(self, path: str, duration_sec: float) -> None:
-    self._progress.setVisible(False)
+    self._reset_progress()
     minutes = duration_sec / 60.0
     ext = Path(path).suffix.lower().lstrip(".") or "audio"
     self._status.setText(f"{ext.upper()} готов: {Path(path).name} ({minutes:.1f} мин)")
@@ -814,7 +450,7 @@ class MainWindow(QWidget):
     )
 
   def _on_export_failed(self, message: str) -> None:
-    self._progress.setVisible(False)
+    self._reset_progress()
     self._status.setText(message)
     QMessageBox.critical(self, "BPMind", message)
 
@@ -839,25 +475,11 @@ class MainWindow(QWidget):
     self._player.seek_to_session(session_sec)
     self._update_time_label(session_sec)
 
-  def _update_seed_controls_for_mode(self) -> None:
-    mode_value = self._mode_combo.currentData()
-    uses_seed = mode_value in (StartMode.RANDOM.value, StartMode.WAVE.value)
-    self._use_seed_cb.setEnabled(uses_seed)
-    if not uses_seed:
-      self._seed_spin.setEnabled(False)
-    elif self._use_seed_cb.isChecked():
-      self._seed_spin.setEnabled(True)
-
   def _on_mode_changed(self) -> None:
     mode_value = self._mode_combo.currentData()
     is_from_track = mode_value == StartMode.FROM_TRACK.value
     self._start_track_combo.setVisible(is_from_track)
-    self._update_seed_controls_for_mode()
-    if uses_auto_mix_settings(load_settings()):
-      profile = self._current_library_profile()
-      if profile is not None:
-        self._apply_profile_to_controls(profile)
-    self._refresh_auto_profile_hint()
+    self._settings.on_start_mode_changed(self.current_start_mode())
 
   def _refresh_start_track_combo(self) -> None:
     self._start_track_combo.clear()
@@ -896,12 +518,12 @@ class MainWindow(QWidget):
 
     self._scan_btn.setEnabled(False)
     self._mix_btn.setEnabled(False)
-    self._progress.setVisible(True)
     self._progress.setValue(0)
+    self._progress.setMaximum(100)
     self._status.setText("Запуск сканирования и анализа...")
 
-    force = self._force_analyze_cb.isChecked()
-    deep = not self._quick_only_cb.isChecked()
+    force = self._settings.force_analyze
+    deep = self._settings.deep_analyze
 
     if deep and default_db_path().exists():
       with TrackRepository(default_db_path()) as repo:
@@ -914,7 +536,7 @@ class MainWindow(QWidget):
             self,
             "BPMind",
             "Глубокий анализ уже выполнен для всех треков.\n\n"
-            "Включите «Пересчитать анализ» в Дополнительно, если хотите прогнать его заново.",
+            "Включите «Пересчитать анализ» в Настройках, если хотите прогнать его заново.",
           )
 
     self._scan_worker = ScanAnalyzeWorker(Path(folder), force=force, deep=deep)
@@ -933,9 +555,9 @@ class MainWindow(QWidget):
     self._status.setText(f"Анализ [{index}/{total}]: {short}")
 
   def _on_scan_finished(self, total: int, analyzed: int, failed: int, summary: str) -> None:
-    self._progress.setVisible(False)
+    self._reset_progress()
     self._refresh_start_track_combo()
-    self._reload_library_profile_ui()
+    self._settings.reload_library_profile_ui(self.current_start_mode())
     self._status.setText(summary)
     if failed > 0:
       QMessageBox.warning(
@@ -943,7 +565,7 @@ class MainWindow(QWidget):
         "BPMind",
         f"{summary}\n\nОшибок при анализе: {failed}.",
       )
-    elif analyzed == 0 and not self._quick_only_cb.isChecked():
+    elif analyzed == 0 and self._settings.deep_analyze:
       QMessageBox.information(self, "BPMind", summary)
 
   def _start_build_mix(self) -> None:
@@ -966,8 +588,8 @@ class MainWindow(QWidget):
     self._mix_btn.setEnabled(False)
     self._status.setText("Построение микса...")
 
-    transition_mode, fixed_transition = self._current_transition_plan()
-    mix_seed = self._current_mix_seed()
+    transition_mode, fixed_transition = self._settings.current_transition_plan()
+    mix_seed = self._settings.mix_seed(mode)
     if transition_mode is TransitionMode.RANDOM and mix_seed is None:
       mix_seed = 1
 
@@ -994,7 +616,7 @@ class MainWindow(QWidget):
     )
 
   def _on_worker_failed(self, message: str) -> None:
-    self._progress.setVisible(False)
+    self._reset_progress()
     self._status.setText(message)
     QMessageBox.critical(self, "BPMind", message)
 

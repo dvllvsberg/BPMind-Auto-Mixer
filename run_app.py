@@ -9,10 +9,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from PySide6.QtWidgets import QApplication
 
+from app.paths import ensure_runtime_directories
 from app.windows.main_window import MainWindow
 
 
 def main() -> int:
+  ensure_runtime_directories()
   app = QApplication(sys.argv)
   app.setApplicationName("BPMind Auto Mixer")
   window = MainWindow()
