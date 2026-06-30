@@ -13,6 +13,11 @@ from engine.domain.models import MixSession, MixSessionTrack, PlannedTransition,
 from engine.playback.audio_loader import load_audio_segment
 from engine.playback.incoming_main import load_incoming_main_audio
 from engine.playback.segment_envelope import apply_opening_track_main_envelope
+from engine.playback.smart_skip import (
+  can_smart_skip,
+  smart_skip_fade_sec,
+  smart_skip_tail_window,
+)
 from engine.playback.timeline_plan import SessionTimeline, TrackOutputPlan, build_session_timeline
 from engine.transitions.crossfade import resample_audio
 from engine.transitions.playback_rules import (
@@ -90,6 +95,7 @@ class SessionPlayer:
     self._state = PlayerState.STOPPED
     self._stop_requested = False
     self._skip_requested = False
+    self._smart_skip_requested = False
     self._jump_requested: int | None = None
     self._seek_local_output_sec: float | None = None
     self._volume = 1.0
@@ -238,6 +244,7 @@ class SessionPlayer:
         self._state = PlayerState.STOPPED
         return False
       self._skip_requested = True
+      self._smart_skip_requested = True
       self._frame_position = 0
       return True
 
@@ -247,10 +254,12 @@ class SessionPlayer:
         self._frame_position = 0
         self._jump_requested = 0
         self._skip_requested = True
+        self._smart_skip_requested = False
         return True
       self._jump_requested = self._index - 1
       self._frame_position = 0
       self._skip_requested = True
+      self._smart_skip_requested = False
       return True
 
   def jump_to_track(self, index: int) -> bool:
@@ -265,6 +274,7 @@ class SessionPlayer:
       self._clear_incoming_preload()
       self._handoff_consumed_index = None
       self._skip_requested = True
+      self._smart_skip_requested = False
       if self._timeline is not None and index < len(self._timeline.tracks):
         self._session_position_sec = self._timeline.tracks[index].session_offset_sec
         self._track_local_output_sec = 0.0
@@ -436,6 +446,51 @@ class SessionPlayer:
       return item.play_until_sec
     return track.duration
 
+  def _play_smart_skip_transition(self, index: int, stream: sd.OutputStream) -> bool:
+    if index + 1 >= len(self._session.tracks):
+      return False
+
+    item = self._session.tracks[index]
+    track = self._tracks_by_id.get(item.track_id)
+    if track is None:
+      return False
+
+    transition = self._transition_from(item.track_id)
+    if not can_smart_skip(transition, enable_crossfade=self._enable_crossfade):
+      return False
+
+    until_sec = self._effective_until(item, track)
+    if until_sec is None:
+      return False
+
+    next_item = self._session.tracks[index + 1]
+    next_track = self._tracks_by_id.get(next_item.track_id)
+    if next_track is None:
+      return False
+
+    with self._lock:
+      local_sec = self._track_local_output_sec
+
+    fade_sec = smart_skip_fade_sec(transition)
+    window = smart_skip_tail_window(item.play_from_sec, until_sec, local_sec, fade_sec)
+    if window is None:
+      return False
+
+    tail_start, tail_end, effective_fade = window
+    mixed = self._build_transition_audio(
+      track,
+      next_track,
+      transition,
+      tail_start,
+      tail_end,
+      next_item.play_from_sec,
+      effective_fade,
+    )
+    if len(mixed) == 0:
+      return False
+
+    return self._play_audio(mixed, stream, output_offset_sec=local_sec)
+
   def _run(self) -> None:
     try:
       with sd.OutputStream(
@@ -465,7 +520,7 @@ class SessionPlayer:
             continue
 
           with self._lock:
-            skip_crossfade = self._skip_requested
+            skip_crossfade = self._skip_requested and not self._smart_skip_requested
 
           seek_local: float | None = None
           with self._lock:
@@ -502,9 +557,17 @@ class SessionPlayer:
               self._clear_incoming_preload()
               self._handoff_consumed_index = None
             elif self._skip_requested:
+              smart_skip = self._smart_skip_requested
               self._skip_requested = False
+              self._smart_skip_requested = False
               self._clear_incoming_preload()
               self._handoff_consumed_index = None
+              if (
+                smart_skip
+                and self._index + 1 < len(self._session.tracks)
+                and self._play_smart_skip_transition(self._index, stream)
+              ):
+                self._handoff_consumed_index = self._index + 1
               if self._index + 1 < len(self._session.tracks):
                 self._index += 1
               else:

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-06-28
+
+Документация требований, Smart Skip на Next, фикс иконки в панели задач при dev-запуске.
+
+### Добавлено
+
+- **Smart Skip** — на Next короткий осознанный переход (до 4 с), если профиль позволяет; иначе мгновенное переключение
+- `docs/ROADMAP.md` и копии PRD/ТЗ/MVP Rules/TEA в `docs/`
+- `configure_platform_app_identity()` — AppUserModelID для Windows при `python run_app.py`
+
 ## [1.6.1] — 2026-06-28
 
 Иконка приложения в окне, на панели задач и в portable exe.

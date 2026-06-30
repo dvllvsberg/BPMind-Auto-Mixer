@@ -92,7 +92,10 @@ tests/        # pytest
 docs/         # архитектура (Transition Engine и др.)
 ```
 
-Подробнее о движке переходов: [docs/transition-engine.md](docs/transition-engine.md).
+## Документация
+
+- [Roadmap и статус требований](docs/ROADMAP.md)
+- [Transition Engine (TEA)](docs/transition-engine.md)
 
 ## Тесты
 

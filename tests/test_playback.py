@@ -400,6 +400,82 @@ def test_session_player_next_skips_current(tmp_path: Path):
   assert player.current_index >= 1
 
 
+def test_session_player_next_attempts_smart_skip(tmp_path: Path):
+  first = tmp_path / "a.wav"
+  second = tmp_path / "b.wav"
+  _make_wav(first, duration_sec=1.0)
+  _make_wav(second, duration_sec=0.1)
+
+  tracks = {
+    1: Track(
+      id=1,
+      path=str(first),
+      title="A",
+      artist="",
+      duration=1.0,
+      file_size=1,
+      file_mtime=1.0,
+      analysis_level=AnalysisLevel.QUICK,
+    ),
+    2: Track(
+      id=2,
+      path=str(second),
+      title="B",
+      artist="",
+      duration=0.1,
+      file_size=1,
+      file_mtime=1.0,
+      analysis_level=AnalysisLevel.QUICK,
+    ),
+  }
+
+  session = MixSession(
+    tracks=[
+      MixSessionTrack(track_id=1, play_until_sec=1.0),
+      MixSessionTrack(track_id=2, play_until_sec=0.1),
+    ],
+    transitions=[
+      PlannedTransition(
+        from_track_id=1,
+        to_track_id=2,
+        type=TransitionType.SMOOTH_BLEND,
+        start_at_sec=0.0,
+        crossfade_duration_sec=6.0,
+      ),
+    ],
+    start_mode=StartMode.RANDOM,
+  )
+
+  class FakeStream:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *args):
+      return False
+
+    def write(self, data):
+      return
+
+  smart_calls: list[int] = []
+
+  def tracked_smart_skip(self, index: int, stream) -> bool:
+    smart_calls.append(index)
+    return True
+
+  with patch("engine.playback.session_player.sd.OutputStream", FakeStream):
+    with patch.object(SessionPlayer, "_play_smart_skip_transition", tracked_smart_skip):
+      player = SessionPlayer(session, tracks)
+      player.play()
+      player.next_track()
+      player.wait_until_finished()
+
+  assert smart_calls == [0]
+  assert player.state == PlayerState.STOPPED
+
+
 def test_session_player_jump_to_track(tmp_path: Path):
   paths = [tmp_path / f"{name}.wav" for name in ("a", "b", "c")]
   for path in paths:
