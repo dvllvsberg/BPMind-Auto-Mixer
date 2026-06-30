@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from PySide6.QtWidgets import QApplication
 
 from app.paths import ensure_runtime_directories
+from app.ui.app_icon import application_icon
 from app.windows.main_window import MainWindow
 
 
@@ -17,7 +18,12 @@ def main() -> int:
   ensure_runtime_directories()
   app = QApplication(sys.argv)
   app.setApplicationName("BPMind Auto Mixer")
+  icon = application_icon()
+  if icon is not None:
+    app.setWindowIcon(icon)
   window = MainWindow()
+  if icon is not None:
+    window.setWindowIcon(icon)
   window.show()
   return app.exec()
 

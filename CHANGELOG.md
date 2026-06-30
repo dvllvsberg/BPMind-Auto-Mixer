@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-06-28
+
+Иконка приложения в окне, на панели задач и в portable exe.
+
+### Добавлено
+
+- Мастер-иконка `assets/icon-master.png` и сборка `packaging/app.ico` (скрипт `packaging/build_app_icon.py`)
+- `application_icon()` — иконка в Qt и PyInstaller spec
+
 ## [1.6.0] — 2026-06-28
 
 Редизайн GUI и portable-сборка для Windows (скачал → распаковал → запустил exe).

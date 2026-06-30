@@ -12,6 +12,8 @@ settings_example = os.path.join(repo_root, "settings", "default.json.example")
 pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all("PySide6")
 librosa_hiddenimports = collect_submodules("librosa")
 
+icon_file = os.path.join(repo_root, "packaging", "app.ico")
+
 a = Analysis(
   [entry_script],
   pathex=[repo_root],
@@ -60,7 +62,7 @@ exe = EXE(
   target_arch=None,
   codesign_identity=None,
   entitlements_file=None,
-  icon=None,
+  icon=icon_file if os.path.exists(icon_file) else None,
 )
 
 coll = COLLECT(
