@@ -27,16 +27,49 @@ jobs:
         env:
           PYTHONPATH: .
 
-      - name: Build portable app
-        run: pyinstaller packaging/bpmind.spec --noconfirm
+      - name: Install Inno Setup
+        run: choco install innosetup -y
 
-      - name: Create zip archive
+      - name: Resolve version from tag
+        id: version
         shell: pwsh
         run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -match '^v(.+)$') { $v = $Matches[1] } else { $v = "0.0.0" }
+          echo "app_version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Build app and installer
+        shell: pwsh
+        run: |
+          python packaging/build_app_icon.py
+          pyinstaller packaging/bpmind.spec --noconfirm
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
+          & $iscc packaging/bpmind.iss "/DMyAppVersion=${{ steps.version.outputs.app_version }}"
+
+      - name: Sign artifacts (optional)
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_PFX_B64: ${{ secrets.WINDOWS_SIGN_PFX_B64 }}
+          WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_SIGN_PFX_B64) {
+            packaging/sign_windows.ps1 -Version "${{ steps.version.outputs.app_version }}"
+          } else {
+            Write-Host "Signing secrets not set — skipping."
+          }
+
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          Copy-Item packaging/portable.flag "dist/BPMind Auto Mixer/portable.flag" -Force
           Compress-Archive -Path "dist/BPMind Auto Mixer" -DestinationPath "dist/BPMind-Auto-Mixer-Windows-portable.zip" -Force
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/BPMind-Auto-Mixer-Windows-portable.zip
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          files: |
+            dist/BPMind-Auto-Mixer-Windows-portable.zip
+            dist/BPMind-Auto-Mixer-Windows-setup-${{ steps.version.outputs.app_version }}.exe

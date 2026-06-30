@@ -6,14 +6,18 @@
 
 ## Скачать (Windows)
 
-**Не нужен Python и PowerShell** — только распаковать и запустить.
+Сборки на [Releases](https://github.com/dvllvsberg/BPMind-Auto-Mixer/releases).
 
-1. Откройте [Releases](https://github.com/dvllvsberg/BPMind-Auto-Mixer/releases)
-2. Скачайте **`BPMind-Auto-Mixer-Windows-portable.zip`** из последнего релиза
-3. Распакуйте архив в любую папку (например `D:\Apps\BPMind`)
-4. Запустите **`BPMind Auto Mixer.exe`**
+| Вариант | Файл | Данные |
+|---------|------|--------|
+| **Установщик** (рекомендуется) | `BPMind-Auto-Mixer-Windows-setup-*.exe` | `%LOCALAPPDATA%\BPMind Auto Mixer\` |
+| **Portable** | `BPMind-Auto-Mixer-Windows-portable.zip` | рядом с exe |
 
-При первом запуске рядом с exe создаются папки `cache/`, `mixes/`, `exports/`, `settings/`.
+1. Скачайте setup или zip из последнего релиза (для тестов — тег `*-beta*`).
+2. Setup: запустите установщик. Portable: распакуйте в любую папку.
+3. Запустите **BPMind Auto Mixer** из меню Пуск или `BPMind Auto Mixer.exe`.
+
+Windows может показать SmartScreen для неподписанной сборки — «Подробнее» → «Выполнить в любом случае». Подробнее: [docs/distribution-beta.md](docs/distribution-beta.md).
 
 ### Быстрый сценарий
 
@@ -48,7 +52,17 @@ copy settings\default.json.example settings\default.json
 python run_app.py
 ```
 
-### Сборка portable exe (локально)
+### Сборка релиза (portable + setup)
+
+```powershell
+pip install -r requirements.txt -r requirements-build.txt
+# Inno Setup 6: https://jrsoftware.org/isinfo.php
+.\packaging\build_release.ps1 -Version 1.8.0-beta.1
+```
+
+См. [docs/distribution-beta.md](docs/distribution-beta.md) — подпись, CI, чеклист beta.
+
+### Сборка portable exe (только PyInstaller)
 
 ```powershell
 pip install -r requirements.txt -r requirements-build.txt
@@ -95,6 +109,7 @@ docs/         # архитектура (Transition Engine и др.)
 ## Документация
 
 - [Roadmap и статус требований](docs/ROADMAP.md)
+- [Beta-сборки и установщик](docs/distribution-beta.md)
 - [Transition Engine (TEA)](docs/transition-engine.md)
 
 ## Тесты

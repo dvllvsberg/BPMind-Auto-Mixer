@@ -93,6 +93,8 @@ class MainWindow(QWidget):
     self._ending_session = False
     self._session_end_prompt_shown = False
     self._session_play_to_end = False
+    self._rebuild_after_session_end = False
+    self._auto_play_after_mix = False
     self._session_timeline: SessionTimeline | None = None
     self._transitions_by_from: dict[int, PlannedTransition] = {}
 
@@ -613,6 +615,12 @@ class MainWindow(QWidget):
   def _on_mix_built(self, count: int, mode_name: str) -> None:
     self._load_mix_plan()
     summary = self._transitions_summary_label.text()
+    auto_play = self._auto_play_after_mix
+    self._auto_play_after_mix = False
+    if auto_play:
+      self._status.setText(f"Новый микс: {count} треков, режим {mode_name}")
+      self._play()
+      return
     self._status.setText(f"Микс готов: {count} треков, режим {mode_name}. {summary}")
     QMessageBox.information(
       self,
@@ -771,6 +779,7 @@ class MainWindow(QWidget):
   def _reset_session_end_state(self) -> None:
     self._session_end_prompt_shown = False
     self._session_play_to_end = False
+    self._rebuild_after_session_end = False
 
   def _session_end_prompt_threshold_sec(self, duration_sec: float) -> float:
     if duration_sec <= 0:
@@ -793,9 +802,6 @@ class MainWindow(QWidget):
       return
 
     self._session_end_prompt_shown = True
-    was_playing = self._player.state == PlayerState.PLAYING
-    if was_playing:
-      self._player.pause()
 
     box = QMessageBox(self)
     box.setWindowTitle("BPMind")
@@ -809,31 +815,29 @@ class MainWindow(QWidget):
 
     clicked = box.clickedButton()
     if clicked is rebuild_btn:
-      self._stop_playback()
-      self._status.setText("Пересборка микса...")
-      self._start_build_mix()
+      self._rebuild_after_session_end = True
+      self._session_play_to_end = True
+      self._player.set_loop_session(False)
+      self._status.setText("Воспроизведение · до конца, затем новый микс")
       return
 
     if clicked is continue_btn:
       self._session_play_to_end = False
       self._player.set_loop_session(True)
       self._session_end_prompt_shown = False
-      if was_playing:
-        self._player.resume()
       self._status.setText("Воспроизведение · сет по кругу")
       return
 
     # «Завершить» или закрытие окна — доиграть сет и остановиться.
     self._session_play_to_end = True
     self._player.set_loop_session(False)
-    if was_playing:
-      self._player.resume()
     self._status.setText("Воспроизведение · до конца сета")
 
   def _on_session_playback_finished(self) -> None:
     if self._ending_session:
       return
     self._ending_session = True
+    rebuild_after = self._rebuild_after_session_end
     self._ui_timer.stop()
     if self._player is not None:
       self._player.stop()
@@ -842,9 +846,14 @@ class MainWindow(QWidget):
     self._now_label.setText("Сейчас: —")
     self._next_label.setText("Далее: —")
     self._highlight_mix_list_row(None)
-    self._status.setText("Конец сета")
-    self._ending_session = False
     self._reset_session_end_state()
+    self._ending_session = False
+    if rebuild_after:
+      self._status.setText("Пересборка микса...")
+      self._auto_play_after_mix = True
+      self._start_build_mix()
+      return
+    self._status.setText("Конец сета")
 
   def _stop_playback(self) -> None:
     self._ui_timer.stop()

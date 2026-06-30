@@ -72,7 +72,7 @@
 | Окно настроек, иконка, portable | ✅ v1.6.x |
 | Иконка в панели задач (dev `python run_app.py`) | ✅ v1.7.0 AppUserModelID |
 | v2.0: таймлайн с типами переходов, полный визуал | ❌ |
-| Inno Setup, `%AppData%`, code signing | ❌ |
+| Inno Setup, `%AppData%`, code signing | 🟡 v1.8.0-beta — setup + скрипты подписи; сертификат у владельца |
 | Дружелюбные ошибки (устаревший анализ и т.д.) | 🟡 |
 
 ---

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.8.0-beta.1] — 2026-06-28
+
+Первая beta для внешних тестировщиков: установщик Windows, AppData, подготовка подписи.
+
+### Добавлено
+
+- **Inno Setup** — `BPMind-Auto-Mixer-Windows-setup-*.exe` (меню Пуск, удаление)
+- Данные установленной версии в `%LOCALAPPDATA%\BPMind Auto Mixer\`; portable — по `portable.flag` рядом с exe
+- `packaging/build_release.ps1`, `packaging/sign_windows.ps1`, [docs/distribution-beta.md](docs/distribution-beta.md)
+- CI: setup + portable zip; опциональная подпись через `WINDOWS_SIGN_PFX_B64`
+
+### Изменено
+
+- **Пересобрать** в диалоге конца сета: доиграть → автосборка и воспроизведение нового микса
+- Диалог конца сета не ставит воспроизведение на паузу
+
 ## [1.7.1] — 2026-06-28
 
 Диалог перед концом сета: пересобрать, зациклить или доиграть до конца.
