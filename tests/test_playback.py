@@ -476,6 +476,64 @@ def test_session_player_next_attempts_smart_skip(tmp_path: Path):
   assert player.state == PlayerState.STOPPED
 
 
+def test_session_player_loop_session_replays_tracks(tmp_path: Path):
+  paths = [tmp_path / f"{name}.wav" for name in ("a", "b")]
+  for path in paths:
+    _make_wav(path, duration_sec=0.5)
+
+  tracks = {
+    track_id: Track(
+      id=track_id,
+      path=str(path),
+      title=chr(ord("A") + track_id - 1),
+      artist="",
+      duration=0.5,
+      file_size=1,
+      file_mtime=1.0,
+      analysis_level=AnalysisLevel.QUICK,
+    )
+    for track_id, path in enumerate(paths, start=1)
+  }
+
+  session = MixSession(
+    tracks=[MixSessionTrack(track_id=i, play_until_sec=0.05) for i in (1, 2)],
+    transitions=[],
+    start_mode=StartMode.RANDOM,
+  )
+
+  class FakeStream:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *args):
+      return False
+
+    def write(self, data):
+      return
+
+  segment_calls = 0
+
+  def fast_segment(self, index, item, track, stream, *, skip_crossfade, seek_local=None):
+    nonlocal segment_calls
+    segment_calls += 1
+    if segment_calls >= 5:
+      self.stop()
+      return False
+    return True
+
+  with patch("engine.playback.session_player.sd.OutputStream", FakeStream):
+    with patch.object(SessionPlayer, "_play_track_segment", fast_segment):
+      player = SessionPlayer(session, tracks, enable_crossfade=False)
+      player.set_loop_session(True)
+      player.play()
+      player.wait_until_finished()
+
+  assert segment_calls >= 5
+
+
 def test_session_player_jump_to_track(tmp_path: Path):
   paths = [tmp_path / f"{name}.wav" for name in ("a", "b", "c")]
   for path in paths:

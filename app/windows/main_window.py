@@ -54,6 +54,9 @@ from engine.transitions.display import (
 )
 from engine.transitions.modes import TransitionMode
 
+SESSION_END_PROMPT_SEC = 45.0
+SESSION_END_PROMPT_MIN_SEC = 12.0
+
 
 def _start_track_combo_label(track: Track, *, list_index: int) -> str:
   bpm = f"{track.bpm:.1f}" if track.bpm else "?"
@@ -88,6 +91,8 @@ class MainWindow(QWidget):
     self._mix_worker: MixBuildWorker | None = None
     self._export_worker: ExportAudioWorker | None = None
     self._ending_session = False
+    self._session_end_prompt_shown = False
+    self._session_play_to_end = False
     self._session_timeline: SessionTimeline | None = None
     self._transitions_by_from: dict[int, PlannedTransition] = {}
 
@@ -703,6 +708,7 @@ class MainWindow(QWidget):
       return
 
     self._stop_playback()
+    self._reset_session_end_state()
     self._player = SessionPlayer(session, self._tracks_by_id)
     self._apply_player_volume()
     self._player.play(start_index=index)
@@ -736,6 +742,7 @@ class MainWindow(QWidget):
       return
 
     self._stop_playback()
+    self._reset_session_end_state()
     self._player = SessionPlayer(session, self._tracks_by_id)
     self._apply_player_volume()
     self._player.play(start_index=0)
@@ -754,14 +761,79 @@ class MainWindow(QWidget):
     if self._player is None:
       return
     if not self._player.next_track():
-      self._end_session_naturally()
+      self._on_session_playback_finished()
 
   def _prev_track(self) -> None:
     if self._player is None:
       return
     self._player.previous_track()
 
-  def _stop_playback(self) -> None:
+  def _reset_session_end_state(self) -> None:
+    self._session_end_prompt_shown = False
+    self._session_play_to_end = False
+
+  def _session_end_prompt_threshold_sec(self, duration_sec: float) -> float:
+    if duration_sec <= 0:
+      return SESSION_END_PROMPT_SEC
+    return min(SESSION_END_PROMPT_SEC, max(SESSION_END_PROMPT_MIN_SEC, duration_sec * 0.15))
+
+  def _maybe_prompt_session_ending(self, status) -> None:
+    if self._player is None or self._session_end_prompt_shown or self._session_play_to_end:
+      return
+    if self._player.state != PlayerState.PLAYING:
+      return
+
+    duration = status.session_duration_sec
+    remaining = duration - status.session_position_sec
+    if remaining <= 0.5 or duration <= 0:
+      return
+
+    threshold = self._session_end_prompt_threshold_sec(duration)
+    if remaining > threshold:
+      return
+
+    self._session_end_prompt_shown = True
+    was_playing = self._player.state == PlayerState.PLAYING
+    if was_playing:
+      self._player.pause()
+
+    box = QMessageBox(self)
+    box.setWindowTitle("BPMind")
+    box.setText("Микс подходит к концу.\nПродолжим вечеринку?")
+    box.setIcon(QMessageBox.Icon.Question)
+    rebuild_btn = box.addButton("Пересобрать", QMessageBox.ButtonRole.ActionRole)
+    continue_btn = box.addButton("Продолжить", QMessageBox.ButtonRole.AcceptRole)
+    finish_btn = box.addButton("Завершить", QMessageBox.ButtonRole.DestructiveRole)
+    box.setDefaultButton(continue_btn)
+    box.exec()
+
+    clicked = box.clickedButton()
+    if clicked is rebuild_btn:
+      self._stop_playback()
+      self._status.setText("Пересборка микса...")
+      self._start_build_mix()
+      return
+
+    if clicked is continue_btn:
+      self._session_play_to_end = False
+      self._player.set_loop_session(True)
+      self._session_end_prompt_shown = False
+      if was_playing:
+        self._player.resume()
+      self._status.setText("Воспроизведение · сет по кругу")
+      return
+
+    # «Завершить» или закрытие окна — доиграть сет и остановиться.
+    self._session_play_to_end = True
+    self._player.set_loop_session(False)
+    if was_playing:
+      self._player.resume()
+    self._status.setText("Воспроизведение · до конца сета")
+
+  def _on_session_playback_finished(self) -> None:
+    if self._ending_session:
+      return
+    self._ending_session = True
     self._ui_timer.stop()
     if self._player is not None:
       self._player.stop()
@@ -770,26 +842,22 @@ class MainWindow(QWidget):
     self._now_label.setText("Сейчас: —")
     self._next_label.setText("Далее: —")
     self._highlight_mix_list_row(None)
+    self._status.setText("Конец сета")
+    self._ending_session = False
+    self._reset_session_end_state()
+
+  def _stop_playback(self) -> None:
+    self._ui_timer.stop()
+    if self._player is not None:
+      self._player.stop()
+      self._player = None
+    self._reset_session_end_state()
+    self._set_playback_enabled(False)
+    self._now_label.setText("Сейчас: —")
+    self._next_label.setText("Далее: —")
+    self._highlight_mix_list_row(None)
     self._timeline_widget.set_position(0.0)
     self._update_time_label(0.0)
-
-  def _end_session_naturally(self) -> None:
-    if self._ending_session:
-      return
-    self._ending_session = True
-    self._stop_playback()
-    self._status.setText("Конец сета")
-
-    reply = QMessageBox.question(
-      self,
-      "BPMind",
-      "Сет закончился. Построить новый микс?",
-      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-      QMessageBox.StandardButton.Yes,
-    )
-    self._ending_session = False
-    if reply == QMessageBox.StandardButton.Yes:
-      self._start_build_mix()
 
   def _set_playback_enabled(self, active: bool) -> None:
     self._pause_btn.setEnabled(active)
@@ -804,14 +872,19 @@ class MainWindow(QWidget):
     now = self._player.now_playing()
     if now is None:
       if self._player.state == PlayerState.STOPPED:
-        self._end_session_naturally()
+        self._on_session_playback_finished()
       return
+
+    status = self._player.playback_status()
+    if self._player.loop_session and status.session_position_sec < SESSION_END_PROMPT_MIN_SEC:
+      self._session_end_prompt_shown = False
+
+    self._maybe_prompt_session_ending(status)
 
     bpm = f"{now.track.bpm:.1f}" if now.track.bpm else "?"
     self._now_label.setText(f"Сейчас [{now.index}/{now.total}]  {bpm} BPM  {track_label(now.track)}")
     self._highlight_mix_list_row(self._player.current_index)
 
-    status = self._player.playback_status()
     self._update_time_label(status.session_position_sec)
     if not self._timeline_widget.is_dragging():
       self._timeline_widget.set_position(status.session_position_sec)

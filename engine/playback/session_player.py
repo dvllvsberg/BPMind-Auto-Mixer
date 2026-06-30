@@ -109,6 +109,26 @@ class SessionPlayer:
     self._incoming_preload_index: int | None = None
     self._incoming_preload_future: Future[np.ndarray] | None = None
     self._incoming_preload_cache: dict[int, np.ndarray] = {}
+    self._loop_session = False
+
+  @property
+  def loop_session(self) -> bool:
+    with self._lock:
+      return self._loop_session
+
+  def set_loop_session(self, enabled: bool) -> None:
+    with self._lock:
+      self._loop_session = enabled
+
+  def _restart_session_loop(self) -> None:
+    self._index = 0
+    self._frame_position = 0
+    self._session_position_sec = 0.0
+    self._track_local_output_sec = 0.0
+    self._handoff_consumed_index = None
+    self._clear_incoming_preload()
+    if self._timeline is not None and self._timeline.tracks:
+      self._session_position_sec = self._timeline.tracks[0].session_offset_sec
 
   @property
   def state(self) -> PlayerState:
@@ -508,6 +528,9 @@ class SessionPlayer:
 
           if index >= len(self._session.tracks):
             with self._lock:
+              if self._loop_session:
+                self._restart_session_loop()
+                continue
               self._state = PlayerState.STOPPED
             return
 
@@ -570,6 +593,8 @@ class SessionPlayer:
                 self._handoff_consumed_index = self._index + 1
               if self._index + 1 < len(self._session.tracks):
                 self._index += 1
+              elif self._loop_session:
+                self._restart_session_loop()
               else:
                 self._state = PlayerState.STOPPED
                 return
