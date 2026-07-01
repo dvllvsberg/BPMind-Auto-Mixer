@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.8.0-beta.2] — 2026-06-30
+
+### Исправлено
+
+- Зависание UI при **Next**: deadlock — Smart Skip вызывался под `threading.Lock`, пока `_play_audio` ждал тот же lock
+
 ## [1.8.0-beta.1] — 2026-06-28
 
 Первая beta для внешних тестировщиков: установщик Windows, AppData, подготовка подписи.

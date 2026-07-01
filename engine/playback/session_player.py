@@ -572,6 +572,8 @@ class SessionPlayer:
               self._frame_position = 0
             continue
 
+          skip_index: int | None = None
+          smart_skip = False
           with self._lock:
             if self._jump_requested is not None:
               self._index = self._jump_requested
@@ -579,28 +581,37 @@ class SessionPlayer:
               self._skip_requested = False
               self._clear_incoming_preload()
               self._handoff_consumed_index = None
+              self._frame_position = 0
             elif self._skip_requested:
               smart_skip = self._smart_skip_requested
+              skip_index = self._index
               self._skip_requested = False
               self._smart_skip_requested = False
               self._clear_incoming_preload()
               self._handoff_consumed_index = None
-              if (
-                smart_skip
-                and self._index + 1 < len(self._session.tracks)
-                and self._play_smart_skip_transition(self._index, stream)
-              ):
-                self._handoff_consumed_index = self._index + 1
-              if self._index + 1 < len(self._session.tracks):
-                self._index += 1
+              self._frame_position = 0
+            else:
+              self._index += 1
+              self._frame_position = 0
+
+          if skip_index is not None:
+            played_transition = False
+            if (
+              smart_skip
+              and skip_index + 1 < len(self._session.tracks)
+            ):
+              played_transition = self._play_smart_skip_transition(skip_index, stream)
+            with self._lock:
+              if played_transition:
+                self._handoff_consumed_index = skip_index + 1
+              if skip_index + 1 < len(self._session.tracks):
+                self._index = skip_index + 1
               elif self._loop_session:
                 self._restart_session_loop()
               else:
                 self._state = PlayerState.STOPPED
                 return
-            else:
-              self._index += 1
-            self._frame_position = 0
+              self._frame_position = 0
     finally:
       self._preload_executor.shutdown(wait=False, cancel_futures=True)
 
