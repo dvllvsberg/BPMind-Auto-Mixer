@@ -61,6 +61,7 @@ class LibraryScanner:
           file_size=stat.st_size,
           file_mtime=stat.st_mtime,
           duration=duration,
+          commit=False,
         )
 
         if action == ScanAction.ADDED:
@@ -71,6 +72,8 @@ class LibraryScanner:
           result.unchanged += 1
 
     result.total = len(found_paths)
+
+    self._repo.flush()
 
     if remove_missing:
       result.removed = self._repo.remove_missing_paths(found_paths)

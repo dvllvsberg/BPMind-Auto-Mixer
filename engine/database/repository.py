@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from engine.database.schema import CREATE_TABLES_SQL, SCHEMA_VERSION
 from engine.domain.enums import AnalysisLevel, ScanAction, TransitionCandidateKind
 from engine.domain.models import EnergySegment, Track, TransitionCandidate
+
+
+@dataclass(frozen=True)
+class _ScanRow:
+  id: int
+  title: str
+  artist: str
+  duration: float | None
+  file_size: int
+  file_mtime: float
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -50,6 +61,8 @@ class TrackRepository:
     self._conn = sqlite3.connect(self._db_path)
     self._conn.row_factory = sqlite3.Row
     self._conn.execute("PRAGMA foreign_keys = ON")
+    self._conn.execute("PRAGMA journal_mode = WAL")
+    self._conn.execute("PRAGMA busy_timeout = 5000")
     self._initialize()
 
   def close(self) -> None:
@@ -76,6 +89,31 @@ class TrackRepository:
       self._conn.execute("ALTER TABLE tracks ADD COLUMN content_start_sec REAL")
     if "content_end_sec" not in columns:
       self._conn.execute("ALTER TABLE tracks ADD COLUMN content_end_sec REAL")
+    self._conn.execute(
+      "CREATE INDEX IF NOT EXISTS idx_tracks_analysis_level ON tracks(analysis_level)"
+    )
+
+  def flush(self) -> None:
+    self._conn.commit()
+
+  def _get_scan_row_by_path(self, path: str) -> _ScanRow | None:
+    row = self._conn.execute(
+      """
+      SELECT id, title, artist, duration, file_size, file_mtime
+      FROM tracks WHERE path = ?
+      """,
+      (path,),
+    ).fetchone()
+    if row is None:
+      return None
+    return _ScanRow(
+      id=row["id"],
+      title=row["title"],
+      artist=row["artist"],
+      duration=row["duration"],
+      file_size=row["file_size"],
+      file_mtime=row["file_mtime"],
+    )
 
   def get_by_path(self, path: str) -> Track | None:
     row = self._conn.execute("SELECT * FROM tracks WHERE path = ?", (path,)).fetchone()
@@ -84,10 +122,61 @@ class TrackRepository:
     return self._hydrate_track(row)
 
   def get_by_id(self, track_id: int) -> Track | None:
-    row = self._conn.execute("SELECT * FROM tracks WHERE id = ?", (track_id,)).fetchone()
-    if row is None:
-      return None
-    return self._hydrate_track(row)
+    return self.get_by_ids([track_id]).get(track_id)
+
+  def get_by_ids(self, track_ids: list[int]) -> dict[int, Track]:
+    if not track_ids:
+      return {}
+    unique_ids = list(dict.fromkeys(track_ids))
+    placeholders = ",".join("?" * len(unique_ids))
+    rows = self._conn.execute(
+      f"SELECT * FROM tracks WHERE id IN ({placeholders})",
+      unique_ids,
+    ).fetchall()
+    if not rows:
+      return {}
+
+    ids = [row["id"] for row in rows]
+    id_placeholders = ",".join("?" * len(ids))
+    candidate_rows = self._conn.execute(
+      f"""
+      SELECT * FROM transition_candidates
+      WHERE track_id IN ({id_placeholders})
+      ORDER BY track_id, position_sec
+      """,
+      ids,
+    ).fetchall()
+    energy_rows = self._conn.execute(
+      f"""
+      SELECT * FROM energy_segments
+      WHERE track_id IN ({id_placeholders})
+      ORDER BY track_id, start_sec
+      """,
+      ids,
+    ).fetchall()
+
+    candidates_by_track: dict[int, list[TransitionCandidate]] = {track_id: [] for track_id in ids}
+    for row in candidate_rows:
+      candidates_by_track[row["track_id"]].append(
+        TransitionCandidate(
+          id=row["id"],
+          track_id=row["track_id"],
+          position_sec=row["position_sec"],
+          kind=TransitionCandidateKind(row["kind"]),
+          confidence=row["confidence"],
+        )
+      )
+
+    energy_by_track: dict[int, list[EnergySegment]] = {track_id: [] for track_id in ids}
+    for row in energy_rows:
+      energy_by_track[row["track_id"]].append(
+        EnergySegment(start_sec=row["start_sec"], end_sec=row["end_sec"], energy=row["energy"])
+      )
+
+    return {
+      row["id"]: _row_to_track(row, candidates_by_track[row["id"]], energy_by_track[row["id"]])
+      for row in rows
+    }
 
   def list_all(self) -> list[Track]:
     rows = self._conn.execute("SELECT * FROM tracks ORDER BY path").fetchall()
@@ -143,8 +232,10 @@ class TrackRepository:
     file_size: int,
     file_mtime: float,
     duration: float | None = None,
+    *,
+    commit: bool = True,
   ) -> ScanAction:
-    existing = self.get_by_path(path)
+    existing = self._get_scan_row_by_path(path)
     if existing is None:
       self._conn.execute(
         """
@@ -153,7 +244,8 @@ class TrackRepository:
         """,
         (path, title, artist, duration, file_size, file_mtime),
       )
-      self._conn.commit()
+      if commit:
+        self._conn.commit()
       return ScanAction.ADDED
 
     file_changed = existing.file_size != file_size or existing.file_mtime != file_mtime
@@ -171,7 +263,8 @@ class TrackRepository:
       )
       self._conn.execute("DELETE FROM energy_segments WHERE track_id = ?", (existing.id,))
       self._conn.execute("DELETE FROM transition_candidates WHERE track_id = ?", (existing.id,))
-      self._conn.commit()
+      if commit:
+        self._conn.commit()
       return ScanAction.UPDATED
 
     if title != existing.title or artist != existing.artist or duration != existing.duration:
@@ -179,7 +272,8 @@ class TrackRepository:
         "UPDATE tracks SET title = ?, artist = ?, duration = ? WHERE id = ?",
         (title, artist, duration, existing.id),
       )
-      self._conn.commit()
+      if commit:
+        self._conn.commit()
       return ScanAction.UNCHANGED
 
     return ScanAction.UNCHANGED

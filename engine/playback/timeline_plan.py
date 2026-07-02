@@ -49,6 +49,9 @@ class TrackOutputPlan:
   play_from_sec: float
   play_until_sec: float
   file_duration_sec: float
+  incoming_file_start_sec: float
+  intro_skip_sec: float
+  output_skip_frames: int
   regions: tuple[TimelineRegion, ...]
 
 
@@ -117,6 +120,7 @@ def build_track_output_plan(
     return None
 
   start_frame = int(item.play_from_sec * 44100)
+  output_skip_frames = 0
   if index > 0 and enable_crossfade:
     prev_item = session.tracks[index - 1]
     prev_transition = transitions_by_from.get(prev_item.track_id)
@@ -136,12 +140,13 @@ def build_track_output_plan(
         if prev_until is not None
         else int(prev_transition.crossfade_duration_sec * 44100)
       )
-      start_frame = int(item.play_from_sec * 44100) + reverse_playback_skip_frames(
+      output_skip_frames = reverse_playback_skip_frames(
         track_path=track.path,
         play_from_sec=item.play_from_sec,
         crossfade_duration_sec=prev_transition.crossfade_duration_sec,
         overlap_frames=overlap_frames,
       )
+      start_frame = int(item.play_from_sec * 44100) + output_skip_frames
     else:
       start_frame = incoming_play_start_frame(
         item.play_from_sec,
@@ -150,6 +155,7 @@ def build_track_output_plan(
         incoming_track_id=item.track_id,
       )
   start_sec = start_frame / 44100.0
+  incoming_file_start_sec = item.play_from_sec if output_skip_frames > 0 else start_sec
 
   spin_sec = 0.0
   intro_skip = 0.0
@@ -275,6 +281,9 @@ def build_track_output_plan(
     play_from_sec=item.play_from_sec,
     play_until_sec=until_sec,
     file_duration_sec=file_duration,
+    incoming_file_start_sec=incoming_file_start_sec,
+    intro_skip_sec=intro_skip,
+    output_skip_frames=output_skip_frames,
     regions=tuple(regions),
   )
 

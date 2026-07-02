@@ -265,7 +265,7 @@ def test_session_player_plays_crossfade_handoff_without_reloading_incoming(tmp_p
   load_calls: list[int] = []
   original_load = SessionPlayer._load_incoming_main_for_index
 
-  def tracked_load(self, index, *, skip_crossfade):
+  def tracked_load(self, index, *, skip_crossfade, seek_output_sec=None):
     load_calls.append(index)
     return original_load(self, index, skip_crossfade=skip_crossfade)
 
@@ -326,7 +326,7 @@ def test_session_player_plays_tape_handoff_without_reloading_incoming(tmp_path: 
   load_calls: list[int] = []
   original_load = SessionPlayer._load_incoming_main_for_index
 
-  def tracked_load(self, index, *, skip_crossfade):
+  def tracked_load(self, index, *, skip_crossfade, seek_output_sec=None):
     load_calls.append(index)
     return original_load(self, index, skip_crossfade=skip_crossfade)
 

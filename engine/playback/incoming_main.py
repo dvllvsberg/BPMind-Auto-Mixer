@@ -40,6 +40,7 @@ def load_incoming_main_audio(
   incoming_track_id: int,
   normalize_fn: Callable[[np.ndarray, int], np.ndarray],
   output_skip_frames: int = 0,
+  intro_skip_sec: float | None = None,
 ) -> np.ndarray:
   if end_sec <= start_sec:
     return np.zeros((0, 2), dtype=np.float32)
@@ -49,13 +50,16 @@ def load_incoming_main_audio(
     enable_crossfade=enable_crossfade,
     incoming_track_id=incoming_track_id,
   )
-  intro_skip = _incoming_tape_intro_skip_sec(
-    track_path,
-    start_sec,
-    prev_transition,
-    enable_crossfade=enable_crossfade,
-    incoming_track_id=incoming_track_id,
-  )
+  if intro_skip_sec is None:
+    intro_skip = _incoming_tape_intro_skip_sec(
+      track_path,
+      start_sec,
+      prev_transition,
+      enable_crossfade=enable_crossfade,
+      incoming_track_id=incoming_track_id,
+    )
+  else:
+    intro_skip = max(0.0, intro_skip_sec)
   effective_start = start_sec + intro_skip
 
   def _trim_skip(audio: np.ndarray) -> np.ndarray:

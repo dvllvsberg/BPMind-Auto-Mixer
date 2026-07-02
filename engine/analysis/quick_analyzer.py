@@ -104,7 +104,7 @@ def analyze_track(path: str | Path) -> QuickAnalysisResult:
   if not file_path.is_file():
     raise FileNotFoundError(f"Файл не найден: {file_path}")
 
-  y, sr = librosa.load(file_path, sr=None, mono=True)
+  y, sr = librosa.load(file_path, sr=22050, mono=True)
   duration = float(librosa.get_duration(y=y, sr=sr))
   bpm = estimate_bpm(y, sr)
 

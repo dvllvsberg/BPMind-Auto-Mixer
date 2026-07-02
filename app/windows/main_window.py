@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
   QComboBox,
   QFileDialog,
@@ -95,8 +95,12 @@ class MainWindow(QWidget):
     self._session_play_to_end = False
     self._rebuild_after_session_end = False
     self._auto_play_after_mix = False
+    self._session_end_dialog: QMessageBox | None = None
     self._session_timeline: SessionTimeline | None = None
     self._transitions_by_from: dict[int, PlannedTransition] = {}
+    self._mix_plan_key: tuple[str, float] | None = None
+    self._ui_last_index: int | None = None
+    self._ui_last_time_sec: int = -1
 
     settings = load_settings()
     saved_folder = settings.get("library_path", "")
@@ -254,6 +258,8 @@ class MainWindow(QWidget):
     self._ui_timer = QTimer(self)
     self._ui_timer.setInterval(400)
     self._ui_timer.timeout.connect(self._refresh_playback_ui)
+    self._ui_active_interval_ms = 400
+    self._ui_background_interval_ms = 1200
 
     self._refresh_start_track_combo()
     self._settings.reload_library_profile_ui(StartMode.CALM)
@@ -267,6 +273,14 @@ class MainWindow(QWidget):
     self._stop_playback()
     self._settings.close()
     super().closeEvent(event)
+
+  def changeEvent(self, event) -> None:  # noqa: N802
+    if event.type() in (QEvent.Type.WindowStateChange, QEvent.Type.ActivationChange):
+      active = self.isActiveWindow() and not self.isMinimized()
+      interval = self._ui_active_interval_ms if active else self._ui_background_interval_ms
+      if self._ui_timer.isActive() and self._ui_timer.interval() != interval:
+        self._ui_timer.setInterval(interval)
+    super().changeEvent(event)
 
   def current_start_mode(self) -> StartMode:
     return StartMode(self._mode_combo.currentData())
@@ -401,6 +415,9 @@ class MainWindow(QWidget):
     return exports_dir() / f"bpmind_{datetime.now():%Y%m%d_%H%M}{extension}"
 
   def _export_current_mix_audio(self) -> None:
+    if self._scan_worker and self._scan_worker.isRunning():
+      QMessageBox.warning(self, "BPMind", "Дождитесь окончания сканирования и анализа.")
+      return
     if not default_mix_path().exists():
       QMessageBox.warning(self, "BPMind", "Сначала постройте или откройте микс.")
       return
@@ -525,6 +542,7 @@ class MainWindow(QWidget):
 
     self._scan_btn.setEnabled(False)
     self._mix_btn.setEnabled(False)
+    self._export_audio_btn.setEnabled(False)
     self._progress.setValue(0)
     self._progress.setMaximum(100)
     self._status.setText("Запуск сканирования и анализа...")
@@ -553,6 +571,7 @@ class MainWindow(QWidget):
     self._scan_worker.failed.connect(self._on_worker_failed)
     self._scan_worker.finished.connect(lambda: self._scan_btn.setEnabled(True))
     self._scan_worker.finished.connect(lambda: self._mix_btn.setEnabled(True))
+    self._scan_worker.finished.connect(lambda: self._export_audio_btn.setEnabled(True))
     self._scan_worker.start()
 
   def _on_analyze_progress(self, index: int, total: int, label: str) -> None:
@@ -633,9 +652,10 @@ class MainWindow(QWidget):
     self._status.setText(message)
     QMessageBox.critical(self, "BPMind", message)
 
-  def _load_mix_plan(self) -> None:
+  def _load_mix_plan(self, *, force: bool = False) -> None:
     mix_path = default_mix_path()
     if not mix_path.exists():
+      self._mix_plan_key = None
       self._mix_track_ids = []
       self._transitions_by_from = {}
       self._session_timeline = None
@@ -643,6 +663,15 @@ class MainWindow(QWidget):
       self._update_time_label(0.0)
       self._transitions_summary_label.setText("")
       self._refresh_mix_list()
+      return
+
+    plan_key = (str(mix_path), mix_path.stat().st_mtime)
+    if (
+      not force
+      and plan_key == self._mix_plan_key
+      and self._session_timeline is not None
+      and self._mix_track_ids
+    ):
       return
 
     session = load_mix_session(mix_path)
@@ -660,13 +689,10 @@ class MainWindow(QWidget):
       return
 
     with TrackRepository(default_db_path()) as repo:
-      self._tracks_by_id = {}
-      for track_id in self._mix_track_ids:
-        track = repo.get_by_id(track_id)
-        if track is not None:
-          self._tracks_by_id[track_id] = track
+      self._tracks_by_id = repo.get_by_ids(self._mix_track_ids)
 
     self._session_timeline = build_session_timeline(session, self._tracks_by_id)
+    self._mix_plan_key = plan_key
     self._timeline_widget.set_timeline(self._session_timeline)
     self._update_time_label(0.0)
     self._refresh_mix_list()
@@ -719,7 +745,7 @@ class MainWindow(QWidget):
     self._reset_session_end_state()
     self._player = SessionPlayer(session, self._tracks_by_id)
     self._apply_player_volume()
-    self._player.play(start_index=index)
+    self._player.play(start_index=index, timeline=self._session_timeline)
     self._set_playback_enabled(True)
     self._ui_timer.start()
     self._status.setText("Воспроизведение")
@@ -753,7 +779,7 @@ class MainWindow(QWidget):
     self._reset_session_end_state()
     self._player = SessionPlayer(session, self._tracks_by_id)
     self._apply_player_volume()
-    self._player.play(start_index=0)
+    self._player.play(start_index=0, timeline=self._session_timeline)
     self._set_playback_enabled(True)
     self._ui_timer.start()
     self._status.setText("Воспроизведение")
@@ -777,6 +803,9 @@ class MainWindow(QWidget):
     self._player.previous_track()
 
   def _reset_session_end_state(self) -> None:
+    if self._session_end_dialog is not None:
+      self._session_end_dialog.close()
+      self._session_end_dialog = None
     self._session_end_prompt_shown = False
     self._session_play_to_end = False
     self._rebuild_after_session_end = False
@@ -787,7 +816,12 @@ class MainWindow(QWidget):
     return min(SESSION_END_PROMPT_SEC, max(SESSION_END_PROMPT_MIN_SEC, duration_sec * 0.15))
 
   def _maybe_prompt_session_ending(self, status) -> None:
-    if self._player is None or self._session_end_prompt_shown or self._session_play_to_end:
+    if (
+      self._player is None
+      or self._session_end_prompt_shown
+      or self._session_play_to_end
+      or self._session_end_dialog is not None
+    ):
       return
     if self._player.state != PlayerState.PLAYING:
       return
@@ -811,27 +845,38 @@ class MainWindow(QWidget):
     continue_btn = box.addButton("Продолжить", QMessageBox.ButtonRole.AcceptRole)
     finish_btn = box.addButton("Завершить", QMessageBox.ButtonRole.DestructiveRole)
     box.setDefaultButton(continue_btn)
-    box.exec()
+    box.setModal(False)
+    box.finished.connect(lambda _result: self._on_session_end_dialog_finished(box))
+    self._session_end_dialog = box
+    box.show()
+    box.raise_()
+    box.activateWindow()
+
+  def _on_session_end_dialog_finished(self, box: QMessageBox) -> None:
+    if self._session_end_dialog is box:
+      self._session_end_dialog = None
+    if self._player is None:
+      return
 
     clicked = box.clickedButton()
-    if clicked is rebuild_btn:
+    if clicked is not None and clicked.text() == "Пересобрать":
       self._rebuild_after_session_end = True
       self._session_play_to_end = True
       self._player.set_loop_session(False)
       self._status.setText("Воспроизведение · до конца, затем новый микс")
-      return
-
-    if clicked is continue_btn:
+    elif clicked is not None and clicked.text() == "Продолжить":
       self._session_play_to_end = False
       self._player.set_loop_session(True)
       self._session_end_prompt_shown = False
       self._status.setText("Воспроизведение · сет по кругу")
-      return
+    else:
+      # «Завершить» или закрытие окна — доиграть сет и остановиться.
+      self._session_play_to_end = True
+      self._player.set_loop_session(False)
+      self._status.setText("Воспроизведение · до конца сета")
 
-    # «Завершить» или закрытие окна — доиграть сет и остановиться.
-    self._session_play_to_end = True
-    self._player.set_loop_session(False)
-    self._status.setText("Воспроизведение · до конца сета")
+    self._ui_last_time_sec = -1
+    self._refresh_playback_ui()
 
   def _on_session_playback_finished(self) -> None:
     if self._ending_session:
@@ -857,6 +902,8 @@ class MainWindow(QWidget):
 
   def _stop_playback(self) -> None:
     self._ui_timer.stop()
+    self._ui_last_index = None
+    self._ui_last_time_sec = -1
     if self._player is not None:
       self._player.stop()
       self._player = None
@@ -888,27 +935,34 @@ class MainWindow(QWidget):
     if self._player.loop_session and status.session_position_sec < SESSION_END_PROMPT_MIN_SEC:
       self._session_end_prompt_shown = False
 
+    current_index = self._player.current_index
+    time_bucket = int(status.session_position_sec)
+
+    if current_index != self._ui_last_index:
+      self._ui_last_index = current_index
+      bpm = f"{now.track.bpm:.1f}" if now.track.bpm else "?"
+      self._now_label.setText(f"Сейчас [{now.index}/{now.total}]  {bpm} BPM  {track_label(now.track)}")
+      self._highlight_mix_list_row(current_index)
+
+      next_text = "Далее: —"
+      if current_index + 1 < len(self._mix_track_ids):
+        next_id = self._mix_track_ids[current_index + 1]
+        next_track = self._tracks_by_id.get(next_id)
+        if next_track is not None:
+          nbpm = f"{next_track.bpm:.1f}" if next_track.bpm else "?"
+          next_text = f"Далее: {nbpm} BPM  {track_label(next_track)}"
+          current_id = self._mix_track_ids[current_index]
+          transition = self._transitions_by_from.get(current_id)
+          if transition is not None:
+            hint = format_transition_arrow(transition).strip()
+            if hint.startswith("→"):
+              next_text += f"  {hint}"
+      self._next_label.setText(next_text)
+
+    if time_bucket != self._ui_last_time_sec:
+      self._ui_last_time_sec = time_bucket
+      self._update_time_label(status.session_position_sec)
+      if not self._timeline_widget.is_dragging():
+        self._timeline_widget.set_position(status.session_position_sec)
+
     self._maybe_prompt_session_ending(status)
-
-    bpm = f"{now.track.bpm:.1f}" if now.track.bpm else "?"
-    self._now_label.setText(f"Сейчас [{now.index}/{now.total}]  {bpm} BPM  {track_label(now.track)}")
-    self._highlight_mix_list_row(self._player.current_index)
-
-    self._update_time_label(status.session_position_sec)
-    if not self._timeline_widget.is_dragging():
-      self._timeline_widget.set_position(status.session_position_sec)
-
-    next_text = "Далее: —"
-    if self._player.current_index + 1 < len(self._mix_track_ids):
-      next_id = self._mix_track_ids[self._player.current_index + 1]
-      next_track = self._tracks_by_id.get(next_id)
-      if next_track is not None:
-        nbpm = f"{next_track.bpm:.1f}" if next_track.bpm else "?"
-        next_text = f"Далее: {nbpm} BPM  {track_label(next_track)}"
-        current_id = self._mix_track_ids[self._player.current_index]
-        transition = self._transitions_by_from.get(current_id)
-        if transition is not None:
-          hint = format_transition_arrow(transition).strip()
-          if hint.startswith("→"):
-            next_text += f"  {hint}"
-    self._next_label.setText(next_text)
